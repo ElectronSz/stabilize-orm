@@ -1,11 +1,11 @@
-import 'reflect-metadata';
-import { RelationType } from './types';
+import "reflect-metadata";
+import { RelationType } from "./types";
 
-export const ModelKey = Symbol('model');
-export const ColumnKey = Symbol('column');
-export const ValidatorKey = Symbol('validator');
-export const RelationKey = Symbol('relation');
-export const SoftDeleteKey = Symbol('softDelete');
+export const ModelKey = Symbol("model");
+export const ColumnKey = Symbol("column");
+export const ValidatorKey = Symbol("validator");
+export const RelationKey = Symbol("relation");
+export const SoftDeleteKey = Symbol("softDelete");
 
 export function Model(tableName: string) {
   return function (constructor: Function) {
@@ -24,7 +24,7 @@ export function Column(name: string, type: string) {
 export function Required() {
   return function (target: any, propertyKey: string) {
     const validators = Reflect.getMetadata(ValidatorKey, target) || {};
-    validators[propertyKey] = [...(validators[propertyKey] || []), 'required'];
+    validators[propertyKey] = [...(validators[propertyKey] || []), "required"];
     Reflect.defineMetadata(ValidatorKey, validators, target);
   };
 }
@@ -32,7 +32,7 @@ export function Required() {
 export function Unique() {
   return function (target: any, propertyKey: string) {
     const validators = Reflect.getMetadata(ValidatorKey, target) || {};
-    validators[propertyKey] = [...(validators[propertyKey] || []), 'unique'];
+    validators[propertyKey] = [...(validators[propertyKey] || []), "unique"];
     Reflect.defineMetadata(ValidatorKey, validators, target);
   };
 }
@@ -46,7 +46,11 @@ export function SoftDelete() {
 export function OneToOne(model: () => any, foreignKey: string) {
   return function (target: any, propertyKey: string) {
     const relations = Reflect.getMetadata(RelationKey, target) || {};
-    relations[propertyKey] = { type: RelationType.OneToOne, targetModel: model, foreignKey };
+    relations[propertyKey] = {
+      type: RelationType.OneToOne,
+      targetModel: model,
+      foreignKey,
+    };
     Reflect.defineMetadata(RelationKey, relations, target);
   };
 }
@@ -54,7 +58,11 @@ export function OneToOne(model: () => any, foreignKey: string) {
 export function ManyToOne(model: () => any, foreignKey: string) {
   return function (target: any, propertyKey: string) {
     const relations = Reflect.getMetadata(RelationKey, target) || {};
-    relations[propertyKey] = { type: RelationType.ManyToOne, targetModel: model, foreignKey };
+    relations[propertyKey] = {
+      type: RelationType.ManyToOne,
+      targetModel: model,
+      foreignKey,
+    };
     Reflect.defineMetadata(RelationKey, relations, target);
   };
 }
@@ -62,15 +70,30 @@ export function ManyToOne(model: () => any, foreignKey: string) {
 export function OneToMany(model: () => any, inverseKey: string) {
   return function (target: any, propertyKey: string) {
     const relations = Reflect.getMetadata(RelationKey, target) || {};
-    relations[propertyKey] = { type: RelationType.OneToMany, targetModel: model, inverseKey };
+    relations[propertyKey] = {
+      type: RelationType.OneToMany,
+      targetModel: model,
+      inverseKey,
+    };
     Reflect.defineMetadata(RelationKey, relations, target);
   };
 }
 
-export function ManyToMany(model: () => any, joinTable: string, foreignKey: string, inverseKey: string) {
+export function ManyToMany(
+  model: () => any,
+  joinTable: string,
+  foreignKey: string,
+  inverseKey: string,
+) {
   return function (target: any, propertyKey: string) {
     const relations = Reflect.getMetadata(RelationKey, target) || {};
-    relations[propertyKey] = { type: RelationType.ManyToMany, targetModel: model, joinTable, foreignKey, inverseKey };
+    relations[propertyKey] = {
+      type: RelationType.ManyToMany,
+      targetModel: model,
+      joinTable,
+      foreignKey,
+      inverseKey,
+    };
     Reflect.defineMetadata(RelationKey, relations, target);
   };
 }

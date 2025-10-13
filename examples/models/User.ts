@@ -1,22 +1,22 @@
-import { Model, Column, Required, SoftDelete } from '../../src';
+import { Model, Column, Required, SoftDelete } from "../../src";
 
-@Model('users')
+@Model("users")
 export class User {
-  @Column('id', 'INTEGER')
+  @Column("id", "INTEGER")
   id?: number;
 
-  @Column('name', 'TEXT')
+  @Column("name", "TEXT")
   @Required()
   name?: string;
 
-  @Column('email', 'TEXT')
+  @Column("email", "TEXT")
   @Required()
   email?: string;
 
-  @Column('active', 'BOOLEAN')
+  @Column("active", "BOOLEAN")
   active?: boolean;
 
-  @Column('deletedAt', 'TEXT')
+  @Column("deletedAt", "TEXT")
   @SoftDelete()
   deletedAt?: string;
 }

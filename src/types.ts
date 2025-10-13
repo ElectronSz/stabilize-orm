@@ -1,8 +1,8 @@
 // src/types.ts
 export enum DBType {
-  SQLite = 'sqlite',
-  MySQL = 'mysql',
-  Postgres = 'postgres',
+  SQLite = "sqlite",
+  MySQL = "mysql",
+  Postgres = "postgres",
 }
 
 export interface DBConfig {
@@ -19,7 +19,7 @@ export interface CacheConfig {
   ttl: number;
   redisUrl?: string;
   cachePrefix?: string;
-  strategy?: 'cache-aside' | 'write-through';
+  strategy?: "cache-aside" | "write-through";
 }
 
 export interface LoggerConfig {
@@ -30,10 +30,10 @@ export interface LoggerConfig {
 }
 
 export enum LogLevel {
-  ERROR = 'error',
-  WARN = 'warn',
-  INFO = 'info',
-  DEBUG = 'debug',
+  ERROR = "error",
+  WARN = "warn",
+  INFO = "info",
+  DEBUG = "debug",
 }
 
 export interface CacheStats {
@@ -43,14 +43,14 @@ export interface CacheStats {
 }
 
 export enum RelationType {
-  OneToOne = 'one-to-one',
-  OneToMany = 'one-to-many',
-  ManyToOne = 'many-to-one',
-  ManyToMany = 'many-to-many',
+  OneToOne = "one-to-one",
+  OneToMany = "one-to-many",
+  ManyToOne = "many-to-one",
+  ManyToMany = "many-to-many",
 }
 
 export interface QueryHint {
-  type: 'INDEX' | 'FORCE_INDEX' | 'USE_INDEX';
+  type: "INDEX" | "FORCE_INDEX" | "USE_INDEX";
   value: string;
 }
 
@@ -66,8 +66,11 @@ export interface Migration {
 }
 
 export class StabilizeError extends Error {
-  constructor(message: string, public readonly code?: string) {
+  constructor(
+    message: string,
+    public readonly code?: string,
+  ) {
     super(message);
-    this.name = 'StabilizeError';
+    this.name = "StabilizeError";
   }
 }

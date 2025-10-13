@@ -1,11 +1,11 @@
-import { Model, Column, Required } from '../../src';
+import { Model, Column, Required } from "../../src";
 
-@Model('roles')
+@Model("roles")
 export class Role {
-  @Column('id', 'INTEGER')
+  @Column("id", "INTEGER")
   id?: number;
 
-  @Column('name', 'TEXT')
+  @Column("name", "TEXT")
   @Required()
   name?: string;
 }

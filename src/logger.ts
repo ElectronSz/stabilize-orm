@@ -1,7 +1,12 @@
 // src/logger.ts
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { LogLevel, type LoggerConfig, type PoolMetrics, StabilizeError } from './types';
+import * as fs from "fs/promises";
+import * as path from "path";
+import {
+  LogLevel,
+  type LoggerConfig,
+  type PoolMetrics,
+  StabilizeError,
+} from "./types";
 
 export interface Logger {
   logQuery(query: string, params: any[], executionTime?: number): void;
@@ -26,7 +31,12 @@ export class ConsoleLogger implements Logger {
   }
 
   private shouldLog(messageLevel: LogLevel): boolean {
-    const levels = [LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO, LogLevel.DEBUG];
+    const levels = [
+      LogLevel.ERROR,
+      LogLevel.WARN,
+      LogLevel.INFO,
+      LogLevel.DEBUG,
+    ];
     return levels.indexOf(messageLevel) <= levels.indexOf(this.level);
   }
 
@@ -43,11 +53,11 @@ export class ConsoleLogger implements Logger {
             await fs.rename(oldPath, newPath).catch(() => {});
           }
         }
-        await fs.writeFile(this.filePath, '');
+        await fs.writeFile(this.filePath, "");
         this.currentFileSize = 0;
       }
     } catch (error) {
-      console.error('Log rotation failed:', error);
+      console.error("Log rotation failed:", error);
     }
   }
 
@@ -60,13 +70,13 @@ export class ConsoleLogger implements Logger {
       await fs.appendFile(this.filePath, logEntry);
       this.currentFileSize += Buffer.byteLength(logEntry);
     } catch (error) {
-      console.error('Failed to write to log file:', error);
+      console.error("Failed to write to log file:", error);
     }
   }
 
   logQuery(query: string, params: any[], executionTime?: number) {
     if (this.shouldLog(LogLevel.DEBUG)) {
-      const message = `[DEBUG] Query: ${query} | Params: ${JSON.stringify(params)} | Time: ${executionTime ? `${executionTime.toFixed(2)}ms` : 'N/A'}`;
+      const message = `[DEBUG] Query: ${query} | Params: ${JSON.stringify(params)} | Time: ${executionTime ? `${executionTime.toFixed(2)}ms` : "N/A"}`;
       console.log(message);
       if (this.filePath) {
         this.writeToFile(message);
@@ -76,7 +86,7 @@ export class ConsoleLogger implements Logger {
 
   logError(error: Error) {
     if (this.shouldLog(LogLevel.ERROR)) {
-      const message = `[ERROR] ${error.message}${error.stack ? `\n${error.stack}` : ''}`;
+      const message = `[ERROR] ${error.message}${error.stack ? `\n${error.stack}` : ""}`;
       console.error(message);
       if (this.filePath) {
         this.writeToFile(message);

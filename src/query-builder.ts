@@ -1,10 +1,10 @@
-import { DBClient } from './client';
-import { Cache } from './cache';
-import { type QueryHint } from './types';
+import { DBClient } from "./client";
+import { Cache } from "./cache";
+import { type QueryHint } from "./types";
 
 export class QueryBuilder<T> {
   private table: string;
-  private selectFields: string[] = ['*'];
+  private selectFields: string[] = ["*"];
   private joins: string[] = [];
   private whereConditions: string[] = [];
   private whereParams: any[] = [];
@@ -18,7 +18,7 @@ export class QueryBuilder<T> {
   }
 
   select(...fields: string[]): QueryBuilder<T> {
-    this.selectFields = fields.length > 0 ? fields : ['*'];
+    this.selectFields = fields.length > 0 ? fields : ["*"];
     return this;
   }
 
@@ -54,16 +54,16 @@ export class QueryBuilder<T> {
   }
 
   build(): { query: string; params: any[] } {
-    let query = `SELECT ${this.selectFields.join(', ')} FROM ${this.table}`;
+    let query = `SELECT ${this.selectFields.join(", ")} FROM ${this.table}`;
     if (this.hints.length > 0) {
-      const hintStr = this.hints.map(h => `${h.type}(${h.value})`).join(' ');
-      query = `SELECT ${hintStr} ${this.selectFields.join(', ')} FROM ${this.table}`;
+      const hintStr = this.hints.map((h) => `${h.type}(${h.value})`).join(" ");
+      query = `SELECT ${hintStr} ${this.selectFields.join(", ")} FROM ${this.table}`;
     }
     if (this.joins.length > 0) {
-      query += ' ' + this.joins.join(' ');
+      query += " " + this.joins.join(" ");
     }
     if (this.whereConditions.length > 0) {
-      query += ' WHERE ' + this.whereConditions.join(' AND ');
+      query += " WHERE " + this.whereConditions.join(" AND ");
     }
     if (this.orderByClause) {
       query += ` ORDER BY ${this.orderByClause}`;
@@ -77,7 +77,11 @@ export class QueryBuilder<T> {
     return { query, params: this.whereParams };
   }
 
-  async execute(client: DBClient, cache?: Cache, cacheKey?: string): Promise<T[]> {
+  async execute(
+    client: DBClient,
+    cache?: Cache,
+    cacheKey?: string,
+  ): Promise<T[]> {
     const { query, params } = this.build();
     if (cache && cacheKey) {
       const cached = await cache.get<T[]>(cacheKey);

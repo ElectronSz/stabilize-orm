@@ -1,25 +1,25 @@
-import Redis from 'ioredis';
-import { type CacheConfig, type CacheStats } from './types';
-import { ConsoleLogger, type Logger } from './logger';
+import Redis from "ioredis";
+import { type CacheConfig, type CacheStats } from "./types";
+import { ConsoleLogger, type Logger } from "./logger";
 
 export class Cache {
   private redis: Redis | null = null;
   private ttl: number;
   private prefix: string;
-  private strategy: 'cache-aside' | 'write-through';
+  private strategy: "cache-aside" | "write-through";
   private logger: Logger;
   private hits: number = 0;
   private misses: number = 0;
 
   constructor(config: CacheConfig, logger: Logger = new ConsoleLogger()) {
     this.ttl = config.ttl;
-    this.prefix = config.cachePrefix || 'cache:';
-    this.strategy = config.strategy || 'cache-aside';
+    this.prefix = config.cachePrefix || "cache:";
+    this.strategy = config.strategy || "cache-aside";
     this.logger = logger;
 
     if (config.enabled && config.redisUrl) {
       this.redis = new Redis(config.redisUrl, { lazyConnect: true });
-      this.redis.on('error', (error) => this.logger.logError(error));
+      this.redis.on("error", (error) => this.logger.logError(error));
     }
   }
 
@@ -50,7 +50,7 @@ export class Cache {
     if (!this.redis) return;
 
     try {
-      await this.redis.set(this.prefix + key, JSON.stringify(value), 'EX', ttl);
+      await this.redis.set(this.prefix + key, JSON.stringify(value), "EX", ttl);
       this.logger.logDebug(`Cache set for key: ${key}`);
     } catch (error) {
       this.logger.logError(error as Error);
@@ -93,7 +93,7 @@ export class Cache {
   async getStats(): Promise<CacheStats> {
     if (!this.redis) return { hits: 0, misses: 0, keys: 0 };
     try {
-      const keys = await this.redis.keys(this.prefix + '*');
+      const keys = await this.redis.keys(this.prefix + "*");
       return { hits: this.hits, misses: this.misses, keys: keys.length };
     } catch (error) {
       this.logger.logError(error as Error);
@@ -104,7 +104,7 @@ export class Cache {
   async disconnect(): Promise<void> {
     if (this.redis) {
       await this.redis.quit();
-      this.logger.logInfo('Redis connection closed');
+      this.logger.logInfo("Redis connection closed");
     }
   }
 }

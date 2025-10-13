@@ -8,7 +8,7 @@
     "stabilize": "./dist/cli/stabilize-cli.js"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --minify && bun build cli/stabilize-cli.ts --outdir dist/cli --target node --minify",
+    "build": "bun build src/index.ts --outdir dist --target bun --minify && bun build cli/stabilize-cli.ts --outdir dist/cli --target bun --minify",
     "test": "vitest run --coverage",
     "prepublishOnly": "bun run build && bun run test",
     "format": "bunx prettier --write .",
