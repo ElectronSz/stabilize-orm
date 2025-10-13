@@ -1,6 +1,6 @@
 {
   "name": "stabilize-orm",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "A lightweight, type-safe ORM for Bun.js with support for SQLite, MySQL, PostgreSQL, and Redis caching",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun --minify && bun build cli/stabilize-cli.ts --outdir dist/cli --target bun --minify",
-    "test": "vitest run --coverage",
+    
     "prepublishOnly": "bun run build && bun run test",
     "format": "bunx prettier --write .",
     "lint": "eslint src tests cli examples",
@@ -25,7 +25,7 @@
     "typescript",
     "database"
   ],
-  "author": "ElectronSz <lwazicd@icloud.com>",
+  "author": "th3b0tk1ill3r <lwazicd@icloud.com>",
   "license": "MIT",
   "dependencies": {
     "ioredis": "^5.4.1",
