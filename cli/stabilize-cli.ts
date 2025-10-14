@@ -6,14 +6,12 @@ import {
   generateMigration,
   Stabilize,
   runMigrations,
-  ModelKey  // Import the Symbol key from your ORM decorators
-} from "../";  // Adjust if decorators are in a subpath, e.g., '../decorators'
-
-import { LogLevel, type DBConfig, type LoggerConfig } from "../types";
+  ModelKey
+} from "../";
+import { LogLevel, type DBConfig, type LoggerConfig, DBType } from "../types";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { glob } from "glob";
-import { randomUUID } from "crypto";
 
 // --- ANSI Color and Styling Helpers ---
 const C = {
@@ -32,29 +30,71 @@ const C = {
   BG_YELLOW: "\x1b[43m\x1b[30m",
 };
 
-program.version("1.0.8").description("Stabilize ORM CLI");
+// DB-aware migrations table
+function getMigrationsTableSQL(dbType: DBType) {
+  switch (dbType) {
+    case DBType.Postgres:
+      return `CREATE TABLE IF NOT EXISTS migrations (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        applied_at TIMESTAMP NOT NULL
+      )`;
+    case DBType.MySQL:
+      return `CREATE TABLE IF NOT EXISTS migrations (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL UNIQUE,
+        applied_at DATETIME NOT NULL
+      )`;
+    case DBType.SQLite:
+    default:
+      return `CREATE TABLE IF NOT EXISTS migrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        applied_at TEXT NOT NULL
+      )`;
+  }
+}
+function getSeedHistoryTableSQL(dbType: DBType) {
+  switch (dbType) {
+    case DBType.Postgres:
+      return `CREATE TABLE IF NOT EXISTS seed_history (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        applied_at TIMESTAMP NOT NULL
+      )`;
+    case DBType.MySQL:
+      return `CREATE TABLE IF NOT EXISTS seed_history (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL UNIQUE,
+        applied_at DATETIME NOT NULL
+      )`;
+    case DBType.SQLite:
+    default:
+      return `CREATE TABLE IF NOT EXISTS seed_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        applied_at TEXT NOT NULL
+      )`;
+  }
+}
 
 // Helper function to load configuration
 async function loadConfig(configPath: string): Promise<{ config: DBConfig; loggerConfig: LoggerConfig; orm: Stabilize }> {
   const absoluteConfigPath = path.resolve(process.cwd(), configPath);
   const configModule = await import(absoluteConfigPath);
   const config: DBConfig = configModule.default || configModule;
-
   const logLevel = program.opts().logLevel as LogLevel || "info";
-
   const loggerConfig: LoggerConfig = {
     level: logLevel,
     filePath: path.resolve(process.cwd(), "logs/stabilize.log"),
     maxFileSize: 5 * 1024 * 1024,
     maxFiles: 3,
   };
-
   const orm = new Stabilize(
     config,
     { enabled: false, ttl: 60 },
     loggerConfig,
   );
-
   return { config, loggerConfig, orm };
 }
 
@@ -79,8 +119,6 @@ program
           console.error(`${C.BG_RED} ERROR ${C.RESET} Failed to import model: ${modelPath}. Ensure file exists and is valid. Details: ${err.message}`);
           return;
         }
-
-        // --- Validate @Model decorator using the exact Symbol key ---
         const tableName = Reflect.getMetadata(ModelKey, modelClass);
         console.log("Errors are calculated", tableName)
         if (!tableName) {
@@ -88,8 +126,8 @@ program
           console.log(`${C.YELLOW} TIP ${C.RESET} - Ensure @Model('${name.toLowerCase()}s') is on the class.\n    - Regenerate with 'generate model ${name}'.\n    - Import 'reflect-metadata' in your model file or entry point if needed.`);
           return;
         }
-        // --- End validation ---
-
+        // Determine dbType
+        const dbType = (await loadConfig("config/database.ts")).config.type ?? DBType.SQLite;
         let migration: any;
         try {
           migration = await generateMigration(modelClass, `create_${name.toLowerCase()}`);
@@ -100,14 +138,11 @@ program
           }
           return;
         }
-
         const migrationDir = path.resolve(process.cwd(), "migrations");
         await fs.mkdir(migrationDir, { recursive: true });
         const timestamp = new Date().toISOString().replace(/[-:T.]/g, "").slice(0, 14);
         const migrationFileName = `${timestamp}_${name.toLowerCase()}`;
         const migrationFile = path.join(migrationDir, `${migrationFileName}.ts`);
-
-        // Generate executable migration with up/down functions
         const migrationContent = `
 import { Migration } from 'stabilize-orm/src/types';
 
@@ -123,7 +158,6 @@ const migration: Migration = {
 
 export default migration;
         `.trim();
-
         await fs.writeFile(migrationFile, migrationContent + "\n");
         console.log(`${C.BG_GREEN} SUCCESS ${C.RESET} Migration generated: ${C.GREEN}${migrationFile}${C.RESET}`);
 
@@ -152,7 +186,6 @@ export class ${name} {
   updatedAt?: string;
 }
         `.trim() + "\n";
-
         await fs.writeFile(modelFile, modelContent);
         console.log(`${C.BG_GREEN} SUCCESS ${C.RESET} Model generated: ${C.GREEN}${modelFile}${C.RESET}`);
 
@@ -162,7 +195,6 @@ export class ${name} {
         const timestamp = new Date().toISOString().replace(/[-:T.]/g, "").slice(0, 14);
         const seedFileName = `${timestamp}_${name.toLowerCase()}`;
         const seedFile = path.join(seedDir, `${seedFileName}.ts`);
-
         const seedContent = `
 import { Stabilize } from 'stabilize-orm';
 import { ${name} } from '../models/${name}';
@@ -198,7 +230,6 @@ export async function rollback(orm: Stabilize) {
   );
 }
         `.trim() + "\n";
-
         await fs.writeFile(seedFile, seedContent);
         console.log(`${C.BG_GREEN} SUCCESS ${C.RESET} Seed generated: ${C.GREEN}${seedFile}${C.RESET}`);
 
@@ -224,24 +255,16 @@ program
     try {
       const { orm: loadedOrm, config } = await loadConfig(options.config);
       orm = loadedOrm;
-
-      await orm.client.query(`
-        CREATE TABLE IF NOT EXISTS migrations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL UNIQUE,
-          applied_at TEXT NOT NULL
-        )
-      `);
+      const dbType = config.type ?? DBType.SQLite;
+      await orm.client.query(getMigrationsTableSQL(dbType));
 
       const migrationDir = path.resolve(process.cwd(), "migrations");
       const migrationFiles = (await glob(`${migrationDir}/*.ts`)).sort();
-
       const migrations = [];
       for (const file of migrationFiles) {
         const migrationName = path.basename(file, ".ts");
         const applied = await orm.client.query(`SELECT name FROM migrations WHERE name = ?`, [migrationName]);
-        if (applied.length > 0) continue; // Skip applied
-
+        if (applied.length > 0) continue;
         let migrationModule;
         try {
           migrationModule = await import(file);
@@ -249,24 +272,19 @@ program
           console.error(`Failed to load migration ${file}:`, err);
           continue;
         }
-
         const migration = migrationModule.default || migrationModule;
         if (!migration || typeof migration.up !== "function") {
           console.warn(`Invalid migration format in ${file}. Skipping.`);
           continue;
         }
-
         migrations.push({ name: migrationName, up: migration.up });
       }
-
       if (migrations.length === 0) {
         console.log(`${C.YELLOW} WARNING ${C.RESET} No pending migrations found.`);
         await orm.close();
         return;
       }
-
       console.log(`${C.BLUE} INFO ${C.RESET} Applying ${C.BRIGHT}${migrations.length}${C.RESET} migration(s)...`);
-
       for (const mig of migrations) {
         console.log(`  Applying: ${C.CYAN}${mig.name}${C.RESET}`);
         await orm.transaction(async () => {
@@ -277,7 +295,6 @@ program
           );
         });
       }
-
       console.log(`${C.BG_GREEN} SUCCESS ${C.RESET} All migrations applied successfully.`);
       await orm.close();
 
@@ -300,22 +317,21 @@ program
   .action(async (options) => {
     let orm: Stabilize | null = null;
     try {
-      const { orm: loadedOrm } = await loadConfig(options.config);
+      const { orm: loadedOrm, config } = await loadConfig(options.config);
       orm = loadedOrm;
+      const dbType = config.type ?? DBType.SQLite;
+      await orm.client.query(getMigrationsTableSQL(dbType));
 
       const latest = await orm.client.query(
         `SELECT name FROM migrations ORDER BY applied_at DESC LIMIT 1`
       );
-
       if (latest.length === 0) {
         console.log(`${C.YELLOW} WARNING ${C.RESET} No migrations to rollback.`);
         await orm.close();
         return;
       }
-
       const migrationName = latest[0].name;
       const migrationFile = path.resolve(process.cwd(), "migrations", `${migrationName}.ts`);
-
       let migrationModule;
       try {
         migrationModule = await import(migrationFile);
@@ -324,20 +340,17 @@ program
         await orm.close();
         return;
       }
-
       const migration = migrationModule.default || migrationModule;
       if (typeof migration.down !== "function") {
         console.error(`${C.BG_RED} ERROR ${C.RESET} Migration ${migrationName} missing down function.`);
         await orm.close();
         return;
       }
-
       console.log(`${C.BLUE} INFO ${C.RESET} Rolling back: ${C.YELLOW}${migrationName}${C.RESET}`);
       await orm.transaction(async () => {
         await migration.down(orm?.client);
         await orm?.client.query(`DELETE FROM migrations WHERE name = ?`, [migrationName]);
       });
-
       console.log(`${C.BG_GREEN} SUCCESS ${C.RESET} Rolled back: ${C.GREEN}${migrationName}${C.RESET}`);
       await orm.close();
 
@@ -360,16 +373,10 @@ program
   .action(async (options) => {
     let orm: Stabilize | null = null;
     try {
-      const { orm: loadedOrm } = await loadConfig(options.config);
+      const { orm: loadedOrm, config } = await loadConfig(options.config);
       orm = loadedOrm;
-
-      await orm.client.query(`
-        CREATE TABLE IF NOT EXISTS seed_history (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL UNIQUE,
-          applied_at TEXT NOT NULL
-        )
-      `);
+      const dbType = config.type ?? DBType.SQLite;
+      await orm.client.query(getSeedHistoryTableSQL(dbType));
 
       const seedDir = path.resolve(process.cwd(), "seeds");
       const seedFiles = await glob(`${seedDir}/*.ts`);
@@ -378,7 +385,6 @@ program
         await orm.close();
         return;
       }
-
       const seedGraph = new Map<string, { file: string; dependencies: string[] }>();
       for (const file of seedFiles) {
         const seedName = path.basename(file, ".ts");
@@ -394,7 +400,6 @@ program
           dependencies: mod.dependencies || [],
         });
       }
-
       const orderedSeeds = topologicalSort(seedGraph);
 
       let appliedCount = 0;
@@ -405,11 +410,9 @@ program
           console.log(`  ${C.DIM}Skipped:${C.RESET} ${seedName}`);
           continue;
         }
-
         console.log(`  ${C.BRIGHT}Running:${C.RESET} ${C.MAGENTA}${seedName}${C.RESET}`);
         const mod = await import(file);
         const seedFn = mod.seed || mod.default;
-
         if (typeof seedFn === "function") {
           await seedFn(orm);
           await orm.client.query(
@@ -421,7 +424,6 @@ program
           console.error(`${C.BG_RED} ERROR ${C.RESET} Invalid seed export in ${file}`);
         }
       }
-
       console.log(`\n${C.BG_GREEN} SUCCESS ${C.RESET} Seeding complete. Applied: ${appliedCount}`);
       await orm.close();
 
@@ -439,13 +441,15 @@ program
 program
   .command("seed:rollback")
   .description("Rollback the most recently applied seed")
-  .option("-c", "Path to database config file", "config/database.ts")
+  .option("-c, --config <path>", "Path to database config file", "config/database.ts")
   .option("-l, --log-level <level>", "Log level (error, warn, info, debug)", "info")
   .action(async (options) => {
     let orm: Stabilize | null = null;
     try {
-      const { orm: loadedOrm } = await loadConfig(options.config);
+      const { orm: loadedOrm, config } = await loadConfig(options.config);
       orm = loadedOrm;
+      const dbType = config.type ?? DBType.SQLite;
+      await orm.client.query(getSeedHistoryTableSQL(dbType));
 
       const latest = await orm.client.query(`SELECT name FROM seed_history ORDER BY applied_at DESC LIMIT 1`);
       if (latest.length === 0) {
@@ -453,7 +457,6 @@ program
         await orm.close();
         return;
       }
-
       const seedName = latest[0].name;
       const seedFile = path.resolve(process.cwd(), "seeds", `${seedName}.ts`);
       let mod;
@@ -464,18 +467,15 @@ program
         await orm.close();
         return;
       }
-
       const rollbackFn = mod.rollback;
       if (typeof rollbackFn !== "function") {
         console.error(`${C.BG_RED} ERROR ${C.RESET} Missing rollback function in ${seedName}`);
         await orm.close();
         return;
       }
-
       console.log(`${C.BLUE} INFO ${C.RESET} Rolling back seed: ${C.YELLOW}${seedName}${C.RESET}`);
       await rollbackFn(orm);
       await orm.client.query(`DELETE FROM seed_history WHERE name = ?`, [seedName]);
-
       console.log(`${C.BG_GREEN} SUCCESS ${C.RESET} Seed rolled back: ${C.GREEN}${seedName}${C.RESET}`);
       await orm.close();
 
@@ -498,28 +498,14 @@ program
   .action(async (options) => {
     let orm: Stabilize | null = null;
     try {
-      const { orm: loadedOrm } = await loadConfig(options.config);
+      const { orm: loadedOrm, config } = await loadConfig(options.config);
       orm = loadedOrm;
-
-      // Ensure tables exist
-      await orm.client.query(`
-        CREATE TABLE IF NOT EXISTS migrations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL UNIQUE,
-          applied_at TEXT NOT NULL
-        )
-      `);
-      await orm.client.query(`
-        CREATE TABLE IF NOT EXISTS seed_history (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL UNIQUE,
-          applied_at TEXT NOT NULL
-        )
-      `);
+      const dbType = config.type ?? DBType.SQLite;
+      await orm.client.query(getMigrationsTableSQL(dbType));
+      await orm.client.query(getSeedHistoryTableSQL(dbType));
 
       const migrationDir = path.resolve(process.cwd(), "migrations");
       const migrationFiles = (await glob(`${migrationDir}/*.ts`)).map(f => path.basename(f, ".ts")).sort();
-
       console.log(`\n${C.BRIGHT}Migration Status:${C.RESET}`);
       console.log(`---------------------------------`);
       for (const name of migrationFiles) {
@@ -527,10 +513,8 @@ program
         const status = res.length > 0 ? `${C.BG_GREEN} APPLIED ${C.RESET}` : `${C.BG_YELLOW} PENDING ${C.RESET}`;
         console.log(`${status} ${C.WHITE}${name}${C.RESET}`);
       }
-
       const seedDir = path.resolve(process.cwd(), "seeds");
       const seedFiles = (await glob(`${seedDir}/*.ts`)).map(f => path.basename(f, ".ts")).sort();
-
       console.log(`\n${C.BRIGHT}Seed Status:${C.RESET}`);
       console.log(`---------------------------------`);
       for (const name of seedFiles) {
@@ -538,7 +522,6 @@ program
         const status = res.length > 0 ? `${C.BG_GREEN} APPLIED ${C.RESET}` : `${C.BG_YELLOW} PENDING ${C.RESET}`;
         console.log(`${status} ${C.WHITE}${name}${C.RESET}`);
       }
-
       await orm.close();
     } catch (error: any) {
       console.error(`${C.BG_RED} FATAL ${C.RESET} Status check failed:`, error.message);
@@ -557,7 +540,6 @@ function topologicalSort(
   const result: string[] = [];
   const visited = new Set<string>();
   const temp = new Set<string>();
-
   function visit(node: string) {
     if (temp.has(node)) throw new Error(`Circular dependency detected: ${node}`);
     if (!visited.has(node)) {
@@ -572,11 +554,9 @@ function topologicalSort(
       result.push(node);
     }
   }
-
   for (const node of graph.keys()) {
     if (!visited.has(node)) visit(node);
   }
-
   return result;
 }
 
