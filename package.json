@@ -28,11 +28,13 @@
   "author": "th3b0tk1ill3r <lwazicd@icloud.com>",
   "license": "MIT",
   "dependencies": {
+    "@types/uuid": "^11.0.0",
     "commander": "^12.1.0",
     "figlet": "^1.9.3",
     "glob": "^11.0.0",
     "ioredis": "^5.4.1",
-    "reflect-metadata": "^0.2.2"
+    "reflect-metadata": "^0.2.2",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.7.0",

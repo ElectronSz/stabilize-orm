@@ -4,12 +4,10 @@ import {
   type DBConfig,
   StabilizeError,
   type PoolMetrics,
-  DBType, // Added DBType for type checking
-  type LoggerConfig, // Kept, but not used in logic
+  DBType,
 } from "./types";
 import { type Logger, ConsoleLogger } from "./logger";
 
-// Helper to determine if we are in Bun SQLite mode based on config
 function isSQLiteConfig(config: DBConfig): boolean {
   return (
     config.type === DBType.SQLite || config.connectionString.includes("sqlite")
@@ -17,14 +15,12 @@ function isSQLiteConfig(config: DBConfig): boolean {
 }
 
 export class DBClient {
-  // Renamed to 'client' for clarity; stores the actual connection (Bun.Database or external driver)
-  // We use 'any' for the SQL client instance since Bun's SQL client is complex (callable function with methods)
   private client: Database | any | null = null;
   private logger: Logger;
   private retryAttempts: number;
   private retryDelay: number;
   private maxJitter: number;
-  // Map stores Bun SQLite Statement objects when in SQLite mode
+
   private preparedStatements: Map<string, Statement> = new Map();
   private config: DBConfig;
 
@@ -38,10 +34,8 @@ export class DBClient {
     this.initializeClient(config);
   }
 
-  // Initializes the connection based on config
   private initializeClient(config: DBConfig) {
     if (isSQLiteConfig(config)) {
-      // Use Bun's native SQLite client, which is synchronous to construct
       try {
         // new Database(path, { create: true }) is the standard Bun method
         this.client = new Database(config.connectionString, { create: true });
@@ -56,9 +50,6 @@ export class DBClient {
         );
       }
     } else {
-      // For other DB types (Postgres/MySQL), initialize a Bun SQL client instance.
-      // This is necessary because the bare `sql` tag is for the default connection,
-      // and we need an instance with specific connection settings, using `SQL` as the constructor.
       this.client = new SQL(config.connectionString);
       this.logger.logDebug(
         `Initialized Bun SQL client for: ${config.connectionString}`,
@@ -70,7 +61,6 @@ export class DBClient {
     return Math.random() * this.maxJitter;
   }
 
-  // Pool metrics are largely irrelevant for single-connection Bun SQLite
   getPoolMetrics(): PoolMetrics {
     return {
       activeConnections: 0,
@@ -112,13 +102,9 @@ export class DBClient {
         let result: T[];
 
         if (stmt) {
-          // Bun SQLite Statement objects use .all() for fetching results
           result = stmt.all(...params) as T[];
         } else if (this.client) {
-          // Path for non-SQLite Bun SQL clients (Postgres/MySQL)
-          // Bun SQL clients do not expose a standard .query() method.
-          // We must use the 'unsafe' helper to execute a raw string query with positional parameters.
-          result = (await (this.client as any).unsafe(query, params)) as T[];
+              result = (await (this.client as any).unsafe(query, params)) as T[];
         } else {
           throw new StabilizeError(
             "Database client is not initialized or does not support query execution.",
@@ -137,7 +123,6 @@ export class DBClient {
             "QUERY_ERROR",
           );
         }
-        // Exponential backoff with jitter
         await new Promise((resolve) =>
           setTimeout(
             resolve,
@@ -150,12 +135,10 @@ export class DBClient {
   }
 
   async transaction<T>(callback: () => Promise<T>): Promise<T> {
-    // Use native Bun SQLite transaction wrapper for safer, faster transactions
     if (this.client instanceof Database) {
       const start = Date.now();
       this.logger.logDebug("Starting native SQLite transaction");
 
-      // Bun's .transaction() automatically handles BEGIN/COMMIT/ROLLBACK
       const tx = this.client.transaction(async () => {
         return callback();
       });
@@ -168,7 +151,6 @@ export class DBClient {
         return result;
       } catch (error) {
         this.logger.logError(error as Error);
-        // The transaction automatically rolls back on error
         throw new StabilizeError(
           `Native transaction failed: ${(error as Error).message}`,
           "TX_ERROR",
@@ -176,13 +158,11 @@ export class DBClient {
       }
     }
 
-    // Fallback to manual transaction with retry logic for non-SQLite
     const start = Date.now();
     this.logger.logDebug("Starting manual transaction (non-SQLite)");
     for (let attempt = 1; attempt <= this.retryAttempts; attempt++) {
       try {
-        // Use this.query, which now correctly handles execution via .unsafe() for non-SQLite
-        await this.query("BEGIN", []);
+          await this.query("BEGIN", []);
         const result = await callback();
         await this.query("COMMIT", []);
         this.logger.logDebug(
@@ -190,7 +170,6 @@ export class DBClient {
         );
         return result;
       } catch (error) {
-        // Attempt rollback, but ignore errors if rollback fails
         await this.query("ROLLBACK", []).catch(() => {
           this.logger.logDebug("Rollback failed. Connection may be invalid.");
         });
@@ -201,7 +180,6 @@ export class DBClient {
             "TX_ERROR",
           );
         }
-        // Exponential backoff with jitter
         await new Promise((resolve) =>
           setTimeout(
             resolve,
@@ -228,7 +206,6 @@ export class DBClient {
       );
       return result;
     } catch (error) {
-      // Attempt rollback, but ignore errors if rollback fails
       await this.query(`ROLLBACK TO SAVEPOINT ${name}`, []).catch(() => {
         this.logger.logDebug(
           `Rollback to savepoint ${name} failed. Connection may be invalid.`,
@@ -241,15 +218,13 @@ export class DBClient {
 
   async close() {
     this.preparedStatements.clear();
-    // Check if the client is a Bun Database instance before closing (Bun SQLite close is sync)
-    if (this.client instanceof Database) {
+      if (this.client instanceof Database) {
       this.client.close();
       this.client = null;
     } else if (
       this.client &&
       typeof (this.client as any).close === "function"
     ) {
-      // Assume external/Bun SQL driver has an async close method
       await (this.client as any).close();
       this.client = null;
     }
