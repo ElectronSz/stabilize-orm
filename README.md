@@ -10,7 +10,7 @@ _Stable, Fast, and Expressive ORM for Bun_
 
 ## 🚀 Features
 
-- **Unified API**: Seamlessly supports SQLite, MySQL, and PostgreSQL
+- **Unified API**: Supports SQLite, MySQL, and PostgreSQL
 - **Retry Logic**: Automatic exponential backoff for queries & transactions
 - **Connection Management**: Pooling, connection switching, live metrics
 - **Transactions & Savepoints**: Built-in support with retry handling
@@ -19,6 +19,7 @@ _Stable, Fast, and Expressive ORM for Bun_
 - **Custom Errors**: `StabilizeError` with clear, database-specific codes
 - **CLI Tool**: Migrate, seed, and query from the command line
 - **Model & Repository Pattern**: Clean, scalable code with decorators
+- **Relationships & Joins**: Model relationships and flexible SQL joins
 
 ---
 
@@ -29,6 +30,18 @@ Stabilize requires Bun (v1.0+).
 ```bash
 bun add stabilize-orm
 ```
+
+---
+
+## 📃 Documentation & Community
+
+- [Changelog](./CHANGELOG.md)
+- [License](./LICENSE.md)
+- [Code of Conduct](./CODE_OF_CONDUCT.md)
+- [Contributing Guide](./CONTRIBUTING.md)
+- [Security Policy](./SECURITY.md)
+- [Support](./SUPPORT.md)
+- [Funding](./FUNDING.md)
 
 ---
 
@@ -58,9 +71,9 @@ export const orm = new Stabilize(dbConfig, cacheConfig);
 
 ---
 
-## 🏗️ Models & Repositories
+## 🏗️ Models, Relationships & Repositories
 
-**Define your models with decorators, and interact using repositories for clean, maintainable code:**
+Define models with decorators, express relationships, and interact using repositories:
 
 ```typescript
 // models/User.ts
@@ -80,12 +93,48 @@ export class User {
 
   @Column("active", "BOOLEAN") @Required()
   active?: boolean;
+}
+```
 
-  @Column("created_at", "TEXT")
-  createdAt?: string;
+```typescript
+// models/Role.ts
+import "reflect-metadata";
+import { Model, Column, Required } from "stabilize-orm";
 
-  @Column("updated_at", "TEXT")
-  updatedAt?: string;
+@Model("roles")
+export class Role {
+  @Column("id", "TEXT") @Required()
+  id: string = crypto.randomUUID();
+
+  @Column("name", "TEXT") @Required()
+  name?: string;
+}
+```
+
+```typescript
+// models/UserRole.ts
+import "reflect-metadata";
+import { Model, Column, Required, ManyToOne } from "stabilize-orm";
+import { User } from "./User";
+import { Role } from "./Role";
+
+@Model("userroles")
+export class UserRole {
+  @Column("id", "TEXT") @Required()
+  id: string = crypto.randomUUID();
+
+  @Column("user_id", "TEXT") @Required()
+  user_id!: string;
+
+  @Column("role_id", "TEXT") @Required()
+  role_id!: string;
+
+  // Relationships
+  @ManyToOne(() => User, "user_id")
+  user?: User;
+
+  @ManyToOne(() => Role, "role_id")
+  role?: Role;
 }
 ```
 
@@ -98,9 +147,42 @@ export const userRepository = orm.getRepository(User);
 
 ---
 
+## 🔀 Table Joins & Relationships
+
+Stabilize ORM supports relationships and flexible SQL joins to help you write advanced queries.
+
+**Relationship Decorators Example:**
+
+```typescript
+@Model("user_roles")
+export class UserRole {
+  // ...columns...
+  @ManyToOne(() => User, "user_id")
+  user?: User;
+  @ManyToOne(() => Role, "role_id")
+  role?: Role;
+}
+```
+
+**Join Example:**
+
+```typescript
+const adminUsers = await orm.getRepository(UserRole)
+  .find()
+  .join("users", "user_roles.user_id = users.id")
+  .join("roles", "use_rroles.role_id = roles.id")
+  .select("users.id", "users.name", "roles.name AS role")
+  .where("roles.name = ?", "Admin")
+  .orderBy("users.name ASC")
+  .execute(orm["client"]);
+```
+- Use `.join(table, condition)` to add joins, then combine with `.select`, `.where`, `.orderBy`, etc.
+
+---
+
 ## 🧑‍💻 Query Builder
 
-Stabilize’s repository `.find()` method gives you a powerful, chainable query builder:
+The repository `.find()` method returns a chainable query builder:
 
 ```typescript
 const qb = userRepository.find()
@@ -116,10 +198,9 @@ console.log(query, params);
 const users = await qb.execute(orm["client"]);
 ```
 
-### QueryBuilder API
+**API:**
 
 ```typescript
-// Repository<User>.find(): QueryBuilder<User>
 {
   select(...fields: string[]): QueryBuilder<User>;
   where(condition: string, ...params: any[]): QueryBuilder<User>;
@@ -134,37 +215,19 @@ const users = await qb.execute(orm["client"]);
 
 ---
 
-## 📚 Usage Examples
-
-### Get All Users
+## 📚 More Usage Examples
 
 ```typescript
-export const getAll = async () => {
-  return await userRepository.find().execute(orm["client"]);
-};
-```
+// Get all users
+export const getAll = async () => userRepository.find().execute(orm["client"]);
 
-### Get Active Users, Ordered by Name
+// Get active users, ordered by name
+export const getActiveUsers = async () =>
+  userRepository.find().where("active = ?", true).orderBy("name ASC").execute(orm["client"]);
 
-```typescript
-export const getActiveUsers = async () => {
-  return await userRepository.find()
-    .where("active = ?", true)
-    .orderBy("name ASC")
-    .execute(orm["client"]);
-};
-```
-
-### Paginated Query
-
-```typescript
-export const getPaginatedUsers = async (limit: number, offset: number) => {
-  return await userRepository.find()
-    .orderBy("created_at DESC")
-    .limit(limit)
-    .offset(offset)
-    .execute(orm["client"]);
-};
+// Paginated query
+export const getPaginatedUsers = async (limit: number, offset: number) =>
+  userRepository.find().orderBy("created_at DESC").limit(limit).offset(offset).execute(orm["client"]);
 ```
 
 ---
@@ -216,9 +279,10 @@ app.listen(3000, () => {
 
 ---
 
+
 ## 📑 License
 
-MIT
+See [LICENSE.md](./LICENSE.md)
 
 ---
 
