@@ -30,7 +30,7 @@ import { DBConfig } from 'stabilize-orm/src/types';
 
 const config: DBConfig = {
   type: 'sqlite', // or 'mysql', 'postgres'
-  connectionString: 'sqlite://myapp.db',
+  connectionString: 'myapp.db',
   poolSize: 10,
   retryAttempts: 3,
 };
