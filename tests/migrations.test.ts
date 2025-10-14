@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { generateMigration, runMigrations } from '../src/migrations';
-import { DBType } from '../src/types';
+import { generateMigration, runMigrations } from '../migrations';
+import { DBType } from '../types';
 // We must mock the imports that provide the metadata keys and the client implementation
-import { ModelKey, ColumnKey, ValidatorKey, SoftDeleteKey } from '../src/decorators';
-import { DBClient } from '../src/client'; 
+import { ModelKey, ColumnKey, ValidatorKey, SoftDeleteKey } from '../decorators';
+import { DBClient } from '../client'; 
 
 // --- MOCKING SETUP ---
 

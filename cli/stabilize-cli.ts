@@ -3,12 +3,10 @@ import { program } from "commander";
 import {
   generateMigration,
   Stabilize,
-  DBType,
-  type DBConfig,
-  LogLevel,
-  type LoggerConfig,
-  runMigrations, // Added runMigrations import
-} from "../src";
+  runMigrations
+} from "../";
+
+import { LogLevel, type DBConfig,  type LoggerConfig } from "../types";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { glob } from "glob";
@@ -245,7 +243,7 @@ program
       orm = new Stabilize(config, { enabled: false, ttl: 60 }, { level: options.logLevel as LogLevel });
 
       // 1. Get the last applied migration record from the DB
-      const latestApplied = await orm["client"].query<{ name: string }>(
+      const latestApplied = await orm["client"].query(
         `SELECT name FROM migrations ORDER BY applied_at DESC LIMIT 1`,
       );
 
@@ -362,7 +360,7 @@ program
       let seedsApplied = 0;
       for (const seedName of orderedSeeds) {
         const { file } = seedGraph.get(seedName)!;
-        const applied = await orm["client"].query<{ id: number }>(
+        const applied = await orm["client"].query(
           `SELECT id FROM seed_history WHERE name = ?`,
           [seedName],
         );
@@ -431,7 +429,7 @@ program
         });
       }
 
-      const latestSeed = await orm["client"].query<{ name: string }>(
+      const latestSeed = await orm["client"].query(
         `SELECT name FROM seed_history ORDER BY applied_at DESC LIMIT 1`,
       );
 
@@ -510,7 +508,7 @@ program
       console.log(`---------------------------------`);
       for (const file of migrationFiles.sort()) {
         const migrationName = path.basename(file, ".ts");
-        const applied = await orm["client"].query<{ name: string }>(
+        const applied = await orm["client"].query(
           `SELECT name FROM migrations WHERE name = ?`,
           [migrationName],
         );
@@ -536,7 +534,7 @@ program
       console.log(`---------------------------------`);
       for (const file of seedFiles.sort()) {
         const seedName = path.basename(file, ".ts");
-        const applied = await orm["client"].query<{ name: string }>(
+        const applied = await orm["client"].query(
           `SELECT name FROM seed_history WHERE name = ?`,
           [seedName],
         );

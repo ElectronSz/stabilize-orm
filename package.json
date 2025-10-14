@@ -1,24 +1,12 @@
 {
   "name": "stabilize-orm",
-  "version": "1.0.7",
+  "version": "1.1.1",
   "description": "A lightweight, type-safe ORM for Bun.js with support for SQLite, MySQL, PostgreSQL, and Redis caching",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    }
-  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "stabilize": "./dist/cli/stabilize-cli.js"
   },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun --minify && bun build cli/stabilize-cli.ts --outdir dist/cli --target bun --minify",
     "prepublishOnly": "bun run build && bun run test",
