@@ -1,7 +1,18 @@
+/**
+ * @file query-builder.ts
+ * @description Provides a fluent API for building and executing SQL queries in a database-agnostic way.
+ * @author ElectronSz
+ */
+
 import { DBClient } from "./client";
 import { Cache } from "./cache";
-import { type QueryHint } from "./types";
 
+/**
+ * A fluent interface for building SQL SELECT queries.
+ * This class allows for the programmatic and readable construction of queries
+ * that can be executed on different database systems via the DBClient.
+ * @template T The type of the entity being queried.
+ */
 export class QueryBuilder<T> {
   private table: string;
   private selectFields: string[] = ["*"];
@@ -11,54 +22,110 @@ export class QueryBuilder<T> {
   private orderByClause: string | null = null;
   private limitValue: number | null = null;
   private offsetValue: number | null = null;
-  private hints: QueryHint[] = [];
 
+  /**
+   * Creates an instance of QueryBuilder.
+   * @param table The name of the main table to query from.
+   */
   constructor(table: string) {
     this.table = table;
   }
 
+  /**
+   * Specifies the columns to select. If not called, all columns (`*`) are selected by default.
+   * @param fields A list of column names to select.
+   * @returns The `QueryBuilder` instance for chaining.
+   * @example
+   * ```
+   * queryBuilder.select('id', 'name', 'email');
+   * ```
+   */
   select(...fields: string[]): QueryBuilder<T> {
     this.selectFields = fields.length > 0 ? fields : ["*"];
     return this;
   }
 
+  /**
+   * Adds a WHERE clause to the query. Multiple calls will be joined with AND.
+   * @param condition The SQL condition string with `?` as placeholders.
+   * @param params The values to substitute for the `?` placeholders.
+   * @returns The `QueryBuilder` instance for chaining.
+   * @example
+   * ```
+   * queryBuilder.where('status = ?', 'active').where('age > ?', 21);
+   * ```
+   */
   where(condition: string, ...params: any[]): QueryBuilder<T> {
     this.whereConditions.push(condition);
     this.whereParams.push(...params);
     return this;
   }
 
+  /**
+   * Adds a LEFT JOIN clause to the query.
+   * @param table The name of the table to join with.
+   * @param condition The ON condition for the join.
+   * @returns The `QueryBuilder` instance for chaining.
+   * @example
+   * ```
+   * queryBuilder.join('profiles', 'profiles.userId = users.id');
+   * ```
+   */
   join(table: string, condition: string): QueryBuilder<T> {
     this.joins.push(`LEFT JOIN ${table} ON ${condition}`);
     return this;
   }
 
+  /**
+   * Adds an ORDER BY clause to the query.
+   * @param clause The column and direction for ordering (e.g., 'createdAt DESC').
+   * @returns The `QueryBuilder` instance for chaining.
+   * @example
+   * ```
+   * queryBuilder.orderBy('lastName ASC');
+   * ```
+   */
   orderBy(clause: string): QueryBuilder<T> {
     this.orderByClause = clause;
     return this;
   }
 
+  /**
+   * Adds a LIMIT clause to the query to restrict the number of rows returned.
+   * @param limit The maximum number of rows to return.
+   * @returns The `QueryBuilder` instance for chaining.
+   * @example
+   * ```
+   * queryBuilder.limit(10);
+   * ```
+   */
   limit(limit: number): QueryBuilder<T> {
     this.limitValue = limit;
     return this;
   }
 
+  /**
+   * Adds an OFFSET clause to the query for pagination.
+   * @param offset The number of rows to skip.
+   * @returns The `QueryBuilder` instance for chaining.
+   * @example
+   * ```
+   * queryBuilder.offset(20);
+   * ```
+   */
   offset(offset: number): QueryBuilder<T> {
     this.offsetValue = offset;
     return this;
   }
 
-  hint(hint: QueryHint): QueryBuilder<T> {
-    this.hints.push(hint);
-    return this;
-  }
-
+  /**
+   * Constructs the final SQL query string and its corresponding parameters.
+   * This is an internal method, typically called by `execute`.
+   * @returns An object containing the final `query` string and `params` array.
+   */
   build(): { query: string; params: any[] } {
     let query = `SELECT ${this.selectFields.join(", ")} FROM ${this.table}`;
-    if (this.hints.length > 0) {
-      const hintStr = this.hints.map((h) => `${h.type}(${h.value})`).join(" ");
-      query = `SELECT ${hintStr} ${this.selectFields.join(", ")} FROM ${this.table}`;
-    }
+    
     if (this.joins.length > 0) {
       query += " " + this.joins.join(" ");
     }
@@ -77,20 +144,43 @@ export class QueryBuilder<T> {
     return { query, params: this.whereParams };
   }
 
+  /**
+   * Executes the constructed query against the database using the provided client.
+   * Handles cache-aside logic if a cache and cacheKey are provided.
+   * @param client The `DBClient` instance to use for executing the query.
+   * @param cache Optional: The `Cache` instance to use for caching.
+   * @param cacheKey Optional: The key to use for getting/setting the result in the cache.
+   * @returns A promise that resolves to an array of results of type `T`.
+   * @example
+   * ```
+   * const users = await stabilize.getRepository(User)
+   *   .find()
+   *   .where('status = ?', 'active')
+   *   .limit(10)
+   *   .execute(dbClient, cache, 'active_users_page_1');
+   * ```
+   */
   async execute(
     client: DBClient,
     cache?: Cache,
     cacheKey?: string,
   ): Promise<T[]> {
     const { query, params } = this.build();
+    
+    // Attempt to retrieve from cache first (cache-aside read)
     if (cache && cacheKey) {
       const cached = await cache.get<T[]>(cacheKey);
       if (cached) return cached;
     }
+
+    // If not in cache, execute query against the database
     const results = await client.query<T>(query, params);
+
+    // Store the database results in the cache for future requests
     if (cache && cacheKey && results.length > 0) {
-      await cache.set(cacheKey, results);
+      await cache.set(cacheKey, results, 60); 
     }
+    
     return results;
   }
 }

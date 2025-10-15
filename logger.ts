@@ -1,6 +1,10 @@
-// src/logger.ts
+/**
+ * @file logger.ts
+ * @description Provides a flexible logger that can write to the console and/or rotating log files.
+ * @author ElectronSz
+ */
+
 import * as fs from "fs/promises";
-import * as path from "path";
 import {
   LogLevel,
   type LoggerConfig,
@@ -8,119 +12,116 @@ import {
   StabilizeError,
 } from "./types";
 
+/**
+ * Defines the interface for a logger that can be used within the ORM.
+ */
 export interface Logger {
   logQuery(query: string, params: any[], executionTime?: number): void;
   logError(error: Error): void;
   logMetrics(metrics: PoolMetrics): void;
   logInfo(message: string): void;
+  logWarn(message: string): void;
   logDebug(message: string): void;
 }
 
+/**
+ * A logger implementation that writes to the console and can optionally write to rotating files.
+ */
 export class ConsoleLogger implements Logger {
-  private level: LogLevel;
-  private filePath: string | null;
-  private maxFileSize: number;
-  private maxFiles: number;
-  private currentFileSize: number = 0;
+  private readonly level: LogLevel;
+  private readonly filePath: string | null;
+  private readonly maxFileSize: number;
+  private readonly maxFiles: number;
 
   constructor(config: LoggerConfig = {}) {
-    this.level = config.level || LogLevel.INFO;
+    this.level = config.level ?? LogLevel.Info;
     this.filePath = config.filePath || null;
     this.maxFileSize = config.maxFileSize || 1 * 1024 * 1024; // 1MB
     this.maxFiles = config.maxFiles || 3;
   }
 
+  /** @internal Checks if a message at a given level should be logged. */
   private shouldLog(messageLevel: LogLevel): boolean {
-    const levels = [
-      LogLevel.ERROR,
-      LogLevel.WARN,
-      LogLevel.INFO,
-      LogLevel.DEBUG,
-    ];
-    return levels.indexOf(messageLevel) <= levels.indexOf(this.level);
+    return messageLevel <= this.level;
   }
 
-  private async rotateLogFile() {
+  /** @internal Rotates log files if the current one exceeds the max size. */
+  private async rotateLogFile(): Promise<void> {
     if (!this.filePath) return;
 
     try {
       const stats = await fs.stat(this.filePath).catch(() => null);
-      if (stats && stats.size >= this.maxFileSize) {
-        for (let i = this.maxFiles - 1; i > 0; i--) {
-          const oldPath = i === 1 ? this.filePath : `${this.filePath}.${i - 1}`;
-          const newPath = `${this.filePath}.${i}`;
-          if (await fs.stat(oldPath).catch(() => null)) {
-            await fs.rename(oldPath, newPath).catch(() => {});
-          }
+      if (!stats || stats.size < this.maxFileSize) {
+        return; // No rotation needed
+      }
+
+      const oldestLog = `${this.filePath}.${this.maxFiles}`;
+      await fs.unlink(oldestLog).catch(() => {});
+
+      for (let i = this.maxFiles - 1; i >= 1; i--) {
+        const source = `${this.filePath}.${i}`;
+        const destination = `${this.filePath}.${i + 1}`;
+        if (await fs.stat(source).catch(() => null)) {
+          await fs.rename(source, destination);
         }
-        await fs.writeFile(this.filePath, "");
-        this.currentFileSize = 0;
       }
+      await fs.rename(this.filePath, `${this.filePath}.1`);
     } catch (error) {
-      console.error("Log rotation failed:", error);
+      // Use StabilizeError for internal logger failures
+      const logError = new StabilizeError("Log rotation failed", "LOG_ROTATION_ERROR", error as Error);
+      console.error(`[LOGGER_ERROR] ${logError.message}\n${logError.stack}`);
     }
   }
 
-  private async writeToFile(message: string) {
-    if (!this.filePath) return;
+  /** @internal Writes a formatted message to the console and/or a file. */
+  private async log(level: LogLevel, message: string): Promise<void> {
+    if (!this.shouldLog(level)) return;
 
-    try {
-      await this.rotateLogFile();
-      const logEntry = `${new Date().toISOString()} ${message}\n`;
-      await fs.appendFile(this.filePath, logEntry);
-      this.currentFileSize += Buffer.byteLength(logEntry);
-    } catch (error) {
-      console.error("Failed to write to log file:", error);
+    const levelStr = LogLevel[level].toUpperCase();
+    const logEntry = `[${levelStr}] ${new Date().toISOString()} - ${message}`;
+
+    switch (level) {
+      case LogLevel.Error: console.error(logEntry); break;
+      case LogLevel.Warn: console.warn(logEntry); break;
+      default: console.log(logEntry); break;
     }
-  }
 
-  logQuery(query: string, params: any[], executionTime?: number) {
-    if (this.shouldLog(LogLevel.DEBUG)) {
-      const message = `[DEBUG] Query: ${query} | Params: ${JSON.stringify(params)} | Time: ${executionTime ? `${executionTime.toFixed(2)}ms` : "N/A"}`;
-      console.log(message);
-      if (this.filePath) {
-        this.writeToFile(message);
+    if (this.filePath) {
+      try {
+        await this.rotateLogFile();
+        await fs.appendFile(this.filePath, logEntry + "\n");
+      } catch (error) {
+        // Use StabilizeError for internal logger failures
+        const logError = new StabilizeError("Failed to write to log file", "LOG_WRITE_ERROR", error as Error);
+        console.error(`[LOGGER_ERROR] ${logError.message}\n${logError.stack}`);
       }
     }
   }
 
-  logError(error: Error) {
-    if (this.shouldLog(LogLevel.ERROR)) {
-      const message = `[ERROR] ${error.message}${error.stack ? `\n${error.stack}` : ""}`;
-      console.error(message);
-      if (this.filePath) {
-        this.writeToFile(message);
-      }
-    }
+  public logQuery(query: string, params: any[], executionTime?: number): void {
+    const time = executionTime ? `${executionTime.toFixed(2)}ms` : "N/A";
+    this.log(LogLevel.Debug, `Query: ${query} | Params: ${JSON.stringify(params)} | Time: ${time}`);
   }
 
-  logMetrics(metrics: PoolMetrics) {
-    if (this.shouldLog(LogLevel.INFO)) {
-      const message = `[INFO] Pool Metrics: Active=${metrics.activeConnections}, Idle=${metrics.idleConnections}, Total=${metrics.totalConnections}`;
-      console.log(message);
-      if (this.filePath) {
-        this.writeToFile(message);
-      }
-    }
+  public logError(error: Error): void {
+    const message = `${error.message}${error.stack ? `\n${error.stack}` : ""}`;
+    this.log(LogLevel.Error, message);
   }
 
-  logInfo(message: string) {
-    if (this.shouldLog(LogLevel.INFO)) {
-      const formatted = `[INFO] ${message}`;
-      console.log(formatted);
-      if (this.filePath) {
-        this.writeToFile(formatted);
-      }
-    }
+  public logMetrics(metrics: PoolMetrics): void {
+    const message = `Pool Metrics: Active=${metrics.activeConnections}, Idle=${metrics.idleConnections}, Total=${metrics.totalConnections}`;
+    this.log(LogLevel.Info, message);
   }
 
-  logDebug(message: string) {
-    if (this.shouldLog(LogLevel.DEBUG)) {
-      const formatted = `[DEBUG] ${message}`;
-      console.log(formatted);
-      if (this.filePath) {
-        this.writeToFile(formatted);
-      }
-    }
+  public logInfo(message: string): void {
+    this.log(LogLevel.Info, message);
+  }
+  
+  public logWarn(message: string): void {
+    this.log(LogLevel.Warn, message);
+  }
+
+  public logDebug(message: string): void {
+    this.log(LogLevel.Debug, message);
   }
 }
