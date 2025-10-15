@@ -14,24 +14,30 @@ function getAutoIncrementPK(dbType: DBType) {
     case DBType.MySQL:
       return "INT AUTO_INCREMENT PRIMARY KEY";
     case DBType.SQLite:
-    default:
       return "INTEGER PRIMARY KEY AUTOINCREMENT";
+    default: // Default to Postgres
+      return "SERIAL PRIMARY KEY";
   }
 }
 
 // Helper to get SQL type for timestamps
 function getTimestampType(dbType: DBType) {
   switch (dbType) {
-    case DBType.Postgres: return "TIMESTAMP";
-    case DBType.MySQL: return "DATETIME";
-    case DBType.SQLite: default: return "TEXT";
+    case DBType.Postgres:
+      return "TIMESTAMP";
+    case DBType.MySQL:
+      return "DATETIME";
+    case DBType.SQLite:
+      return "TEXT";
+    default: // Default to Postgres
+      return "TIMESTAMP";
   }
 }
 
 export async function generateMigration(
   model: new (...args: any[]) => any,
   name: string,
-  dbType: DBType = DBType.SQLite, // default to SQLite
+  dbType: DBType = DBType.Postgres, // default to Postgres
 ): Promise<Migration> {
   const tableName = Reflect.getMetadata(ModelKey, model);
   if (!tableName)
@@ -93,11 +99,16 @@ function getMigrationsTableSQL(dbType: DBType) {
         applied_at DATETIME NOT NULL
       )`;
     case DBType.SQLite:
-    default:
       return `CREATE TABLE IF NOT EXISTS migrations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         applied_at TEXT NOT NULL
+      )`;
+    default: // Default to Postgres
+      return `CREATE TABLE IF NOT EXISTS migrations (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TIMESTAMP NOT NULL
       )`;
   }
 }
@@ -106,7 +117,7 @@ export async function runMigrations(config: DBConfig, migrations: Migration[]) {
   const client = new DBClient(config);
   try {
     // Detect DB type from config
-    const dbType = config.type ?? DBType.SQLite;
+    const dbType = config.type ?? DBType.Postgres;
 
     await client.query(getMigrationsTableSQL(dbType));
 
