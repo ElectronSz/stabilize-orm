@@ -30,7 +30,7 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 
 ## 📦 Installation
 
-Stabilize ORM requires a modern JavaScript runtime (Bun v1.0+, Node.js v18+, Deno v1.28+).
+Stabilize ORM requires a modern JavaScript runtime (Bun v1.3+).
 
 ```bash
 # Using Bun
