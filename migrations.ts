@@ -6,14 +6,13 @@
  */
 
 import { DBClient } from "./client";
-import { ModelKey, ColumnKey, ValidatorKey, SoftDeleteKey } from "./decorators";
+import { ModelKey, ColumnKey, ValidatorKey, SoftDeleteKey, VersionedKey } from "./decorators";
 import { type DBConfig, type Migration, StabilizeError, DBType, DataTypes } from "./types";
 
 type ColumnData = { name: string; type: string };
 type ColumnMetadata = Record<string, ColumnData>;
 type ValidatorMetadata = Record<string, string[]>;
 
-// --- FIX: New Helper Function to format queries for different DBs ---
 /**
  * @internal
  * Formats a SQL query with placeholders for the target database dialect.
@@ -29,7 +28,6 @@ function formatQuery(query: string, dbType: DBType): string {
   }
   return query;
 }
-
 
 /**
  * Maps an abstract data type (from DataTypes enum or a string) to the correct SQL type string
@@ -110,7 +108,6 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
   return "TEXT";
 }
 
-
 /**
  * @internal
  * Gets the database-specific SQL for an auto-incrementing primary key.
@@ -130,44 +127,10 @@ function getAutoIncrementPK(dbType: DBType): string {
 }
 
 /**
- * @internal
- * Gets the database-specific SQL for a timestamp column.
- * @param dbType The target database dialect.
- * @returns The SQL string for the timestamp column type.
- */
-function getTimestampType(dbType: DBType): string {
-  switch (dbType) {
-    case DBType.Postgres:
-      return "TIMESTAMP";
-    case DBType.MySQL:
-      return "DATETIME";
-    case DBType.SQLite:
-    default:
-      return "TEXT";
-  }
-}
-
-/**
- * @internal
- * Gets the database-specific SQL for a default `CURRENT_TIMESTAMP` value.
- * @param dbType The target database dialect.
- * @returns The SQL string for the default value.
- */
-function getTimestampDefault(dbType: DBType): string {
-  switch (dbType) {
-    case DBType.Postgres:
-    case DBType.SQLite:
-      return "DEFAULT CURRENT_TIMESTAMP";
-    case DBType.MySQL:
-      return "DEFAULT CURRENT_TIMESTAMP";
-    default:
-      return "DEFAULT CURRENT_TIMESTAMP";
-  }
-}
-
-/**
  * Generates SQL migration scripts (`up` and `down`) based on a model's decorators.
  * This function reads the metadata from a model class to create a `CREATE TABLE` statement.
+ *
+ * If the model is versioned (has @Versioned), also generates a history table for time-travel queries.
  *
  * @param model The model class decorated with `@Model` and `@Column`.
  * @param name A descriptive name for the migration (used for the migration object).
@@ -186,6 +149,7 @@ export async function generateMigration(
 
   const columns: ColumnMetadata = Reflect.getMetadata(ColumnKey, model.prototype) || {};
   const validators: ValidatorMetadata = Reflect.getMetadata(ValidatorKey, model.prototype) || {};
+  const versioned: boolean = !!Reflect.getMetadata(VersionedKey, model);
 
   const columnDefs: string[] = [];
 
@@ -210,10 +174,51 @@ export async function generateMigration(
     columnDefs.push(defParts.join(" "));
   }
 
-  const up = [`CREATE TABLE IF NOT EXISTS ${tableName} (${columnDefs.join(", ")})`];
-  const down = [`DROP TABLE IF EXISTS ${tableName}`];
+  const up: string[] = [`CREATE TABLE IF NOT EXISTS ${tableName} (${columnDefs.join(", ")})`];
+  const down: string[] = [`DROP TABLE IF EXISTS ${tableName}`];
+
+  // If model is versioned, add history table migration
+  if (versioned) {
+    const [historyUp, historyDown] = generateHistoryMigration(tableName, columnDefs, dbType);
+    up.push(historyUp);
+    down.push(historyDown);
+  }
 
   return { up, down, name };
+}
+
+/**
+ * Generates SQL for a version/audit history table for time-travel queries.
+ * @param tableName The name of the main table.
+ * @param columnDefs The column definitions (from the main table).
+ * @param dbType The target database dialect.
+ */
+function generateHistoryMigration(
+  tableName: string,
+  columnDefs: string[],
+  dbType: DBType,
+): [string, string] {
+  const historyTable = `${tableName}_history`;
+  let opType = "VARCHAR(10) NOT NULL";
+  let versionType = "INT NOT NULL";
+  let tsType = dbType === DBType.MySQL ? "DATETIME" :
+    dbType === DBType.SQLite ? "TEXT" : "TIMESTAMP";
+  let modByType = dbType === DBType.MySQL ? "VARCHAR(255)" : "TEXT";
+  let modAtType = tsType + (dbType === DBType.Postgres ? " DEFAULT CURRENT_TIMESTAMP" : "");
+
+  const historyColumns = [
+    ...columnDefs,
+    `operation ${opType}`,
+    `version ${versionType}`,
+    `valid_from ${tsType} NOT NULL`,
+    `valid_to ${tsType}`,
+    `modified_by ${modByType}`,
+    `modified_at ${modAtType}`
+  ];
+  return [
+    `CREATE TABLE IF NOT EXISTS ${historyTable} (${historyColumns.join(", ")})`,
+    `DROP TABLE IF EXISTS ${historyTable}`
+  ];
 }
 
 /**

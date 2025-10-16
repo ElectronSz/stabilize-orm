@@ -7,7 +7,6 @@
 import "reflect-metadata";
 import { RelationType, DataTypes } from "./types";
 
-
 export const ModelKey = Symbol("model");
 export const ColumnKey = Symbol("column");
 export const ValidatorKey = Symbol("validator");
@@ -15,7 +14,7 @@ export const RelationKey = Symbol("relation");
 export const SoftDeleteKey = Symbol("softDelete");
 export const DefaultKey = Symbol("default");
 export const IndexKey = Symbol("index");
-
+export const VersionedKey = Symbol("versioned");
 
 export interface ColumnOptions {
   name?: string;
@@ -42,11 +41,9 @@ export function Model(tableName: string) {
 export function Column(options: ColumnOptions | DataTypes) {
   return function (target: any, propertyKey: string) {
     const columns = Reflect.getMetadata(ColumnKey, target) || {};
- 
     const columnOptions: ColumnOptions = typeof options === 'object' ? options : { type: options };
-    
     columns[propertyKey] = {
-      name: columnOptions.name || propertyKey, 
+      name: columnOptions.name || propertyKey,
       ...columnOptions,
     };
     Reflect.defineMetadata(ColumnKey, columns, target);
@@ -80,9 +77,9 @@ export function Unique() {
  * @param value The default value.
  */
 export function Default(value: any) {
-    return function (target: any, propertyKey: string) {
-        Reflect.defineMetadata(DefaultKey, value, target, propertyKey);
-    };
+  return function (target: any, propertyKey: string) {
+    Reflect.defineMetadata(DefaultKey, value, target, propertyKey);
+  };
 }
 
 /**
@@ -90,13 +87,12 @@ export function Default(value: any) {
  * @param indexName Optional: A custom name for the index.
  */
 export function Index(indexName?: string) {
-    return function (target: any, propertyKey: string) {
-        const indexes = Reflect.getMetadata(IndexKey, target) || {};
-        indexes[propertyKey] = indexName || `idx_${propertyKey}`;
-        Reflect.defineMetadata(IndexKey, indexes, target);
-    };
+  return function (target: any, propertyKey: string) {
+    const indexes = Reflect.getMetadata(IndexKey, target) || {};
+    indexes[propertyKey] = indexName || `idx_${propertyKey}`;
+    Reflect.defineMetadata(IndexKey, indexes, target);
+  };
 }
-
 
 /**
  * Decorator to enable soft-delete functionality on a model.
@@ -105,6 +101,15 @@ export function Index(indexName?: string) {
 export function SoftDelete() {
   return function (target: any, propertyKey: string) {
     Reflect.defineMetadata(SoftDeleteKey, propertyKey, target);
+  };
+}
+
+/**
+ * Decorator to enable versioning (history, snapshot & time-travel) on a model.
+ */
+export function Versioned() {
+  return function (target: any) {
+    Reflect.defineMetadata(VersionedKey, true, target);
   };
 }
 

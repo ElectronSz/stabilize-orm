@@ -20,7 +20,12 @@ import {
   ValidatorKey,
   RelationKey,
   SoftDeleteKey,
+  VersionedKey,
 } from "./decorators";
+import { getHooks, type HookType } from "./hooks";
+
+type VersionOperation = "insert" | "update" | "delete";
+
 
 /**
  * Provides a generic repository for a model `T`.
@@ -46,6 +51,8 @@ export class Repository<T> {
   >;
   private softDeleteField: string | null;
   private logger: Logger;
+  private versioned: boolean;
+  private historyTable: string;
 
   /**
    * Creates an instance of Repository.
@@ -69,6 +76,8 @@ export class Repository<T> {
     this.softDeleteField =
       Reflect.getMetadata(SoftDeleteKey, model.prototype) || null;
     this.logger = logger;
+    this.versioned = !!Reflect.getMetadata(VersionedKey, model);
+    this.historyTable = `${this.table}_history`;
   }
 
   /**
@@ -99,6 +108,17 @@ export class Repository<T> {
           "VALIDATION_ERROR",
         );
       }
+    }
+  }
+
+  /**
+  * Runs lifecycle hooks of a given type for the entity.
+  * @param entity The entity instance.
+  * @param type The hook type (e.g., 'beforeCreate').
+  */
+  private async runHooks(entity: any, type: HookType): Promise<void> {
+    for (const hook of getHooks(entity, type)) {
+      await hook();
     }
   }
 
@@ -153,6 +173,136 @@ export class Repository<T> {
   }
 
   /**
+ * Snapshot query: get record as it was at a point in time.
+ */
+  async asOf(
+    id: number | string,
+    asOfDate: Date,
+    _client?: DBClient
+  ): Promise<T | null> {
+    if (!this.versioned) throw new StabilizeError("Model is not versioned", "VERSIONING_ERROR");
+    const client = _client || this.client;
+    const rows = await client.query<T>(
+      `SELECT * FROM ${this.historyTable} WHERE id = ? AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?) ORDER BY version DESC LIMIT 1`,
+      [id, asOfDate, asOfDate]
+    );
+    return rows[0] || null;
+  }
+
+  /**
+ * Get all history for a record.
+ */
+  async history(
+    id: number | string,
+    _client?: DBClient
+  ): Promise<T[]> {
+    if (!this.versioned) throw new StabilizeError("Model is not versioned", "VERSIONING_ERROR");
+    const client = _client || this.client;
+    return client.query<T>(
+      `SELECT * FROM ${this.historyTable} WHERE id = ? ORDER BY version ASC`,
+      [id]
+    );
+  }
+
+
+
+  /**
+   * Rollback a record to a previous version.
+   */
+  async rollback(
+    id: number | string,
+    version: number,
+    _client?: DBClient
+  ): Promise<T> {
+    if (!this.versioned) throw new StabilizeError("Model is not versioned", "VERSIONING_ERROR");
+    const client = _client || this.client;
+    return client.transaction(async (txClient) => {
+      const rows = await txClient.query<T>(
+        `SELECT * FROM ${this.historyTable} WHERE id = ? AND version = ? LIMIT 1`,
+        [id, version]
+      );
+      if (!rows.length) throw new StabilizeError("Version not found", "ROLLBACK_ERROR");
+
+      const entity = rows[0];
+      const columns = Object.keys(this.columns).filter((c) => c !== "id");
+      const setClause = columns.map((c) => `${this.columns[c]!.name} = ?`).join(", ");
+      const params = columns.map((c) => (entity as any)[c]);
+
+      await txClient.query(
+        `UPDATE ${this.table} SET ${setClause} WHERE id = ?`,
+        [...params, id]
+      );
+      await this.writeHistory({ ...entity, version: version + 1 }, "update", txClient);
+      return this.findOne(id, {}, txClient) as Promise<T>;
+    });
+  }
+
+
+  /**
+   * Writes a versioned history row for the entity to the history table.
+   *
+   * This method maps entity property keys to their corresponding SQL column names
+   * (as defined in metadata) to ensure that inserts match the schema for all supported
+   * databases (Postgres, MySQL, SQLite).
+   *
+   * This function works for Postgres, MySQL, and SQLite, and uses positional parameters
+   * (properly formatted for the target database) for safety and compatibility.
+   *
+   * @param entity - The entity object being versioned
+   * @param operation - The operation performed ("insert", "update", "delete")
+   * @param client - The database client to use for the insert
+   * @param user - The user/system responsible for the change (default: "system")
+   */
+  private async writeHistory(
+    entity: any,
+    operation: VersionOperation,
+    client: DBClient,
+    user?: string
+  ) {
+    if (!this.versioned) return;
+
+    // Get property keys and corresponding SQL column names
+    const propertyKeys = Object.keys(this.columns);
+    const sqlColumnNames = propertyKeys.map((k) => this.columns[k]!.name);
+
+    // Build historyColumns using SQL column names
+    const historyColumns = [
+      ...sqlColumnNames,
+      "operation",
+      "version",
+      "valid_from",
+      "valid_to",
+      "modified_by",
+      "modified_at"
+    ];
+
+    // Map values from entity using property keys
+    const values = propertyKeys.map((k) => entity[k]);
+
+    const params = [
+      ...values,
+      operation,
+      entity.version || 1,
+      new Date(),
+      null,
+      user || "system",
+      new Date()
+    ];
+    // Database-agnostic placeholder formatting
+    let placeholders: string;
+    if (client.config.type === DBType.Postgres) {
+      placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
+    } else {
+      placeholders = params.map(() => "?").join(", ");
+    }
+
+    await client.query(
+      `INSERT INTO ${this.historyTable} (${historyColumns.join(", ")}) VALUES (${placeholders})`,
+      params
+    );
+  }
+
+  /**
    * Creates a new record in the database within a transaction.
    * @param entity The data for the new record.
    * @param options Optional: Specify relations to load on the returned entity.
@@ -166,11 +316,22 @@ export class Repository<T> {
     entity: Partial<T>,
     options: { relations?: string[] } = {},
   ): Promise<T> {
-    return this.client.transaction((txClient) =>
-      this._create(entity, options, txClient),
-    );
-  }
+    return this.client.transaction(async (txClient) => {
+      const instance = new (Object.getPrototypeOf(entity).constructor || Object)();
+      Object.assign(instance, entity);
 
+      await this.runHooks(instance, "beforeCreate");
+      await this.runHooks(instance, "beforeSave");
+
+      const result = await this._create(entity, options, txClient);
+
+      await this.runHooks(result, "afterCreate");
+      await this.runHooks(result, "afterSave");
+
+      await this.writeHistory(result, "insert", txClient);
+      return result;
+    });
+  }
   /**
    * @internal
    * The private implementation for creating a record, executed within a transaction.
@@ -245,9 +406,30 @@ export class Repository<T> {
     entities: Partial<T>[],
     options: { relations?: string[]; batchSize?: number } = {},
   ): Promise<T[]> {
-    return this.client.transaction((txClient) =>
-      this._bulkCreate(entities, options, txClient),
-    );
+    return this.client.transaction(async (txClient) => {
+      // Prepare entity instances for hooks
+      const preparedEntities = entities.map(data => {
+        const instance = new (this as any).model();
+        Object.assign(instance, data);
+        return instance;
+      });
+
+      for (const entity of preparedEntities) {
+        await this.runHooks(entity, "beforeCreate");
+        await this.runHooks(entity, "beforeSave");
+      }
+
+      const results = await this._bulkCreate(entities, options, txClient);
+
+      for (const result of results) {
+        await this.runHooks(result, "afterCreate");
+        await this.runHooks(result, "afterSave");
+        if (this.versioned) {
+          await this.writeHistory(result, "insert", txClient);
+        }
+      }
+      return results;
+    });
   }
 
   /**
@@ -358,9 +540,27 @@ export class Repository<T> {
    * ```
    */
   async update(id: number | string, entity: Partial<T>): Promise<T> {
-    return this.client.transaction((txClient) =>
-      this._update(id, entity, txClient),
-    );
+    return this.client.transaction(async (txClient) => {
+      const before = await this.findOne(id, {}, txClient);
+      if (!before) throw new StabilizeError("Not found", "UPDATE_ERROR");
+      const instance = new (Object.getPrototypeOf(before).constructor || Object)();
+      Object.assign(instance, before, entity);
+
+      await this.runHooks(instance, "beforeUpdate");
+      await this.runHooks(instance, "beforeSave");
+
+      const result = await this._update(id, entity, txClient);
+
+      await this.runHooks(result, "afterUpdate");
+      await this.runHooks(result, "afterSave");
+
+      await this.writeHistory(
+        { ...before, ...entity, version: (before as any).version ? (before as any).version + 1 : 1 },
+        "update",
+        txClient
+      );
+      return result;
+    });
   }
 
   /**
@@ -442,14 +642,48 @@ export class Repository<T> {
     for (let i = 0; i < updates.length; i += batchSize) {
       const batch = updates.slice(i, i + batchSize);
       for (const update of batch) {
-        const keys = Object.keys(update.set).filter((k) => this.columns[k]);
-        const setClause = keys.map((k) => `${this.columns[k]?.name} = ?`).join(", ");
-        const query = `UPDATE ${this.table} SET ${setClause} WHERE ${update.where.condition}${this.softDeleteField ? ` AND ${this.softDeleteField} IS NULL` : ""}`;
-        const params = [
-          ...keys.map((k) => (update.set as any)[k]),
-          ...update.where.params,
-        ];
-        await client.query(query, params);
+        // Find all IDs matching the where clause
+        const rows = await client.query<{ id: number | string }>(
+          `SELECT id FROM ${this.table} WHERE ${update.where.condition}${this.softDeleteField ? ` AND ${this.softDeleteField} IS NULL` : ""}`,
+          update.where.params,
+        );
+        for (const { id } of rows) {
+          // Fetch record before update for versioning
+          const before = await this.findOne(id, {}, client);
+          if (!before) continue;
+
+          // Prepare instance for hooks
+          const instance = new ((this as any).model || Object)();
+          Object.assign(instance, before, update.set);
+
+          await this.runHooks(instance, "beforeUpdate");
+          await this.runHooks(instance, "beforeSave");
+
+          const keys = Object.keys(update.set).filter((k) => this.columns[k]);
+          const setClause = keys.map((k) => `${this.columns[k]?.name} = ?`).join(", ");
+          const query = `UPDATE ${this.table} SET ${setClause} WHERE id = ?${this.softDeleteField ? ` AND ${this.softDeleteField} IS NULL` : ""}`;
+          const params = [
+            ...keys.map((k) => (update.set as any)[k]),
+            id,
+          ];
+          await client.query(query, params);
+
+          const after = await this.findOne(id, {}, client);
+          if (after) {
+            await this.runHooks(after, "afterUpdate");
+            await this.runHooks(after, "afterSave");
+            if (this.versioned) {
+              await this.writeHistory(
+                {
+                  ...after,
+                  version: (before as any).version ? (before as any).version + 1 : 1
+                },
+                "update",
+                client
+              );
+            }
+          }
+        }
       }
     }
 
@@ -459,7 +693,6 @@ export class Repository<T> {
       `Bulk updated ${updates.length} ${this.table} entities in ${(performance.now() - start).toFixed(2)}ms`,
     );
   }
-
   /**
    * Performs an "update or insert" operation based on a set of unique keys.
    * @param entity The entity to upsert.
@@ -504,6 +737,32 @@ export class Repository<T> {
     const insertParams = columns.map((k) => (entity as any)[k]);
     let params = [...insertParams, ...updateParams];
 
+    // Try to find the record before upsert
+    let before: T | null = null;
+    let isUpdate = false;
+    if (this.versioned && keys.length > 0) {
+      const whereClause = keys.map((k) => `${this.columns[k]?.name} = ?`).join(" AND ");
+      const whereParams = keys.map((k) => (entity as any)[k]);
+      const found = await client.query<T>(
+        `SELECT * FROM ${this.table} WHERE ${whereClause} LIMIT 1`,
+        whereParams
+      );
+      before = found[0] || null;
+      isUpdate = !!before;
+    }
+
+    // Prepare instance for hooks
+    const instance = new ((this as any).model || Object)();
+    Object.assign(instance, before || {}, entity);
+
+    if (isUpdate) {
+      await this.runHooks(instance, "beforeUpdate");
+      await this.runHooks(instance, "beforeSave");
+    } else {
+      await this.runHooks(instance, "beforeCreate");
+      await this.runHooks(instance, "beforeSave");
+    }
+
     if (dbType === DBType.SQLite) {
       query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON CONFLICT(${keys.map((k) => this.columns[k]!.name).join(", ")}) DO UPDATE SET ${updateClause}`;
     } else if (dbType === DBType.MySQL) {
@@ -532,6 +791,14 @@ export class Repository<T> {
 
     const result = results[0] ?? ((await this.findOne(id, {}, client)) as T);
 
+    if (isUpdate) {
+      await this.runHooks(result, "afterUpdate");
+      await this.runHooks(result, "afterSave");
+    } else {
+      await this.runHooks(result, "afterCreate");
+      await this.runHooks(result, "afterSave");
+    }
+
     if (this.cache) {
       await this.cache.invalidatePattern(`find:${this.table}:*`);
       if (this.cache.getStrategy() === "write-through") {
@@ -539,12 +806,19 @@ export class Repository<T> {
       }
     }
 
+    if (this.versioned) {
+      await this.writeHistory(
+        { ...result, version: before ? ((before as any).version ? (before as any).version + 1 : 1) : 1 },
+        before ? "update" : "insert",
+        client
+      );
+    }
+
     this.logger.logDebug(
       `Upserted ${this.table} with ID ${id} in ${(performance.now() - start).toFixed(2)}ms`,
     );
     return result;
   }
-
   /**
    * Deletes a record by its ID. Performs a soft delete if enabled on the model.
    * @param id The ID of the record to delete.
@@ -555,7 +829,16 @@ export class Repository<T> {
    * ```
    */
   async delete(id: number | string): Promise<void> {
-    return this.client.transaction((txClient) => this._delete(id, txClient));
+    return this.client.transaction(async (txClient) => {
+      const before = await this.findOne(id, {}, txClient);
+      if (!before) throw new StabilizeError("Not found", "DELETE_ERROR");
+      await this.runHooks(before, "beforeDelete");
+
+      await this._delete(id, txClient);
+
+      await this.runHooks(before, "afterDelete");
+      await this.writeHistory(before, "delete", txClient);
+    });
   }
 
   /**
@@ -619,14 +902,25 @@ export class Repository<T> {
     const batchSize = options.batchSize || 1000;
     for (let i = 0; i < ids.length; i += batchSize) {
       const batch = ids.slice(i, i + batchSize);
-      const placeholders = batch.map(() => "?").join(", ");
-      const query = this.softDeleteField
-        ? `UPDATE ${this.table} SET ${this.softDeleteField} = ? WHERE id IN (${placeholders})`
-        : `DELETE FROM ${this.table} WHERE id IN (${placeholders})`;
-      const params = this.softDeleteField
-        ? [new Date().toISOString(), ...batch]
-        : batch;
-      await client.query(query, params);
+      for (const id of batch) {
+        const before = await this.findOne(id, {}, client);
+        if (!before) continue;
+
+        await this.runHooks(before, "beforeDelete");
+
+        const query = this.softDeleteField
+          ? `UPDATE ${this.table} SET ${this.softDeleteField} = ? WHERE id = ?`
+          : `DELETE FROM ${this.table} WHERE id = ?`;
+        const params = this.softDeleteField ? [new Date().toISOString(), id] : [id];
+
+        await client.query(query, params);
+
+        await this.runHooks(before, "afterDelete");
+
+        if (this.versioned) {
+          await this.writeHistory(before, "delete", client);
+        }
+      }
     }
 
     if (this.cache) await this.cache.invalidatePattern(`find:${this.table}:*`);
@@ -635,7 +929,6 @@ export class Repository<T> {
       `Bulk deleted ${ids.length} ${this.table} entities in ${(performance.now() - start).toFixed(2)}ms`,
     );
   }
-
   /**
    * Recovers a soft-deleted record by its ID.
    * Throws an error if soft delete is not enabled on the model.

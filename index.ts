@@ -9,6 +9,7 @@ import { type Logger, ConsoleLogger } from "./logger";
 import { QueryBuilder } from "./query-builder";
 import { Repository } from "./repository";
 import { runMigrations, generateMigration, type Migration } from "./migrations";
+import { Hook } from "./hooks";
 import {
   Model,
   Column,
@@ -22,6 +23,7 @@ import {
   ModelKey,
   ColumnKey,
   ValidatorKey,
+  Versioned,
   RelationKey,
   SoftDeleteKey,
 } from "./decorators";
@@ -30,7 +32,7 @@ import {
   type CacheConfig,
   type LoggerConfig,
   DBType,
-  DataTypes, // --- FIX: Import DataTypes here ---
+  DataTypes,
   StabilizeError,
   type PoolMetrics,
   type QueryHint,
@@ -158,6 +160,8 @@ export {
   Required,
   Unique,
   SoftDelete,
+  Versioned,
+  Hook,
   OneToOne,
   ManyToOne,
   OneToMany,
