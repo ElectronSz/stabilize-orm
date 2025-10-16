@@ -1,6 +1,6 @@
 # Stabilize ORM
 
-_A Modern, Type-Safe, and Expressive ORM for Bun, Node.js, and Deno_
+_A Modern, Type-Safe, and Expressive ORM for Bun_
 
 ---
 
