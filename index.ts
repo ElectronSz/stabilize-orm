@@ -1,4 +1,3 @@
-
 /**
  * @file stabilize.ts
  * @description The main entry point for the Stabilize ORM, tying together the client, cache, and repositories.
@@ -31,6 +30,7 @@ import {
   type CacheConfig,
   type LoggerConfig,
   DBType,
+  DataTypes, // --- FIX: Import DataTypes here ---
   StabilizeError,
   type PoolMetrics,
   type QueryHint,
@@ -149,6 +149,7 @@ export {
   Cache,
   ConsoleLogger,
   DBType,
+  DataTypes, 
   LogLevel,
   RelationType,
   StabilizeError,

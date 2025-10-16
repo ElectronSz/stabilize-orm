@@ -227,7 +227,7 @@ export class Repository<T> {
     );
     return result;
   }
-  
+
   /**
    * Creates multiple records in the database in batches.
    * @param entities An array of entities to create.
@@ -275,47 +275,72 @@ export class Repository<T> {
       const batch = entities.slice(i, i + batchSize);
       const keys = Object.keys(batch[0]!).filter((k) => this.columns[k]);
       const columnNames = keys.map((k) => this.columns[k]?.name).join(", ");
-      const placeholders = `(${keys.map(() => "?").join(", ")})`;
-      let query = `INSERT INTO ${this.table} (${columnNames}) VALUES ${batch.map(() => placeholders).join(", ")}`;
-      const params = batch.flatMap((entity) =>
+
+      let query: string;
+      let params: any[] = batch.flatMap((entity) =>
         keys.map((k) => (entity as any)[k]),
       );
 
-      let batchResults: T[] = [];
-      let ids: (number | string)[] = [];
-
       if (dbType === DBType.Postgres) {
-        query += " RETURNING *";
-        batchResults = await client.query<T>(query, params);
-        ids = batchResults.map((r) => (r as any).id);
+        // PostgreSQL: numbered placeholders ($1, $2, ...)
+        let paramIdx = 1;
+        const valuePlaceholders = batch
+          .map(
+            () =>
+              `(${keys.map(() => `$${paramIdx++}`).join(", ")})`
+          )
+          .join(", ");
+        query = `INSERT INTO ${this.table} (${columnNames}) VALUES ${valuePlaceholders} RETURNING *`;
+        const batchResults = await client.query<T>(query, params);
+        const ids = batchResults.map((r) => (r as any).id);
+
+        // Handle relation loading if needed
+        let finalResults = batchResults;
+        if (ids.length > 0 && batchResults.length === 0) {
+          const queryBuilder = this.find().where(
+            `id IN (${ids.map(() => "?").join(", ")})`,
+            ...ids,
+          );
+          if (options.relations) {
+            for (const rel of options.relations) {
+              await this.loadRelation(queryBuilder, rel);
+            }
+          }
+          finalResults = await queryBuilder.execute(client);
+        }
+        results.push(...finalResults);
+
       } else {
+        // SQLite/MySQL: ? placeholders
+        const placeholders = `(${keys.map(() => "?").join(", ")})`;
+        query = `INSERT INTO ${this.table} (${columnNames}) VALUES ${batch.map(() => placeholders).join(", ")}`;
         await client.query(query, params);
-        ids = (
+        const ids = (
           await client.query<{ id: number }>(
             `SELECT id FROM ${this.table} ORDER BY id DESC LIMIT ?`,
             [batch.length],
           )
         ).map((row) => row.id);
-      }
 
-      if (ids.length > 0 && batchResults.length === 0) {
-        const queryBuilder = this.find().where(
-          `id IN (${ids.map(() => "?").join(", ")})`,
-          ...ids,
-        );
-        if (options.relations) {
-          for (const rel of options.relations) {
-            await this.loadRelation(queryBuilder, rel);
+        let batchResults: T[] = [];
+        if (ids.length > 0) {
+          const queryBuilder = this.find().where(
+            `id IN (${ids.map(() => "?").join(", ")})`,
+            ...ids,
+          );
+          if (options.relations) {
+            for (const rel of options.relations) {
+              await this.loadRelation(queryBuilder, rel);
+            }
           }
+          batchResults = await queryBuilder.execute(client);
         }
-        batchResults = await queryBuilder.execute(client);
+        results.push(...batchResults);
       }
-
-      results.push(...batchResults);
     }
-    
+
     if (this.cache) await this.cache.invalidatePattern(`find:${this.table}:*`);
-    
+
     this.logger.logDebug(
       `Bulk created ${results.length} ${this.table} entities in ${(performance.now() - start).toFixed(2)}ms`,
     );
@@ -495,7 +520,7 @@ export class Repository<T> {
     let id: number | string | undefined = (results[0] as any)?.id || (entity as any).id;
 
     if (!id && dbType !== DBType.Postgres) {
-       if (dbType === DBType.SQLite) {
+      if (dbType === DBType.SQLite) {
         id = (await client.query<{ id: number }>("SELECT last_insert_rowid() as id"))[0]?.id;
       } else if (dbType === DBType.MySQL) {
         const result = await client.query<{ "LAST_INSERT_ID()": number }>("SELECT LAST_INSERT_ID()");
@@ -513,7 +538,7 @@ export class Repository<T> {
         await this.cache.set(`findOne:${this.table}:${id}`, [result], 60);
       }
     }
-    
+
     this.logger.logDebug(
       `Upserted ${this.table} with ID ${id} in ${(performance.now() - start).toFixed(2)}ms`,
     );
@@ -545,7 +570,7 @@ export class Repository<T> {
       ? `UPDATE ${this.table} SET ${this.softDeleteField} = ? WHERE id = ?`
       : `DELETE FROM ${this.table} WHERE id = ?`;
     const params = this.softDeleteField ? [new Date().toISOString(), id] : [id];
-    
+
     await client.query(query, params);
 
     if (this.cache) {
@@ -638,7 +663,7 @@ export class Repository<T> {
         "RECOVER_ERROR",
       );
     }
-    
+
     await client.query(
       `UPDATE ${this.table} SET ${this.softDeleteField} = NULL WHERE id = ?`,
       [id],
@@ -653,7 +678,7 @@ export class Repository<T> {
         `findOne:${this.table}:${id}`,
       ]);
     }
-    
+
     this.logger.logDebug(
       `Recovered ${this.table} with ID ${id} in ${(performance.now() - start).toFixed(2)}ms`,
     );

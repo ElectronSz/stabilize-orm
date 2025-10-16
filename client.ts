@@ -37,7 +37,7 @@ function isMySQLPool(client: any): client is mysql.Pool {
 export class DBClient {
   private client!: Database | Pool | mysql.Pool | PoolClient | mysql.PoolConnection;
   private logger: Logger;
-  public readonly config: DBConfig; 
+  public readonly config: DBConfig;
   private retryAttempts: number;
   private retryDelay: number;
   private maxJitter: number;
@@ -82,12 +82,12 @@ export class DBClient {
     } else if (isMySQLConfig(config)) {
       this.client = mysql.createPool(config.connectionString);
       this.logger.logDebug(`Initialized MySQL Pool client.`);
-    } else { 
-      this.client = new Pool({ connectionString: config.connectionString });
+    } else if (config.type = DBType.Postgres) {
+      this.client = new Pool({ connectionString: config.connectionString! });
       this.logger.logDebug(`Initialized Postgres Pool client.`);
     }
   }
-  
+
   /** @internal Gets a random jitter value to add to retry delays. */
   private getJitter = () => Math.random() * this.maxJitter;
 
@@ -103,13 +103,16 @@ export class DBClient {
    * const users = await dbClient.query('SELECT * FROM users WHERE status = ?', ['active']);
    * ```
    */
+
   async query<T>(query: string, params: any[] = []): Promise<T[]> {
     const start = Date.now();
-    this.logger.logQuery(query, params);
 
     for (let attempt = 1; attempt <= this.retryAttempts; attempt++) {
       try {
         let result: any;
+
+        // Log the query before execution
+        this.logger.logQuery(query, params);
 
         if (this.client instanceof Database) { // SQLite
           let stmt = this.preparedStatements.get(query);
@@ -118,25 +121,34 @@ export class DBClient {
             this.preparedStatements.set(query, stmt);
           }
           result = stmt.all(...params);
-        } else if (isMySQLPool(this.client) || ('query' in this.client && 'release' in this.client)) { // mysql2 Pool or Connection
-            const [rows] = await (this.client as mysql.Pool).query(query, params);
-            result = rows;
-        } else { // Postgres Pool or Client
-          const pgQuery = query.replace(/\?/g, (_, i) => `$${i + 1}`);
+        } else if (this.config.type === DBType.MySQL && isMySQLPool(this.client)) { // MySQL
+          const [rows] = await (this.client as mysql.Pool).query(query, params);
+          result = rows;
+        } else if (this.config.type === DBType.Postgres ) { // Postgres
+
+          let paramIndex = 0;
+          const pgQuery = query.replace(/\?/g, () => `$${++paramIndex}`);
           const pgResult = await (this.client as Pool).query(pgQuery, params);
-          result = pgResult.rows;
+          result = Array.isArray(pgResult.rows) ? pgResult.rows : [];
+        } else {
+          throw new StabilizeError("Unknown database client type", "QUERY_ERROR");
         }
 
         const executionTime = Date.now() - start;
         this.logger.logQuery(query, params, executionTime);
-        return result as T[];
+        return Array.isArray(result) ? result as T[] : [];
       } catch (error) {
+        console.log("error: ", error);
+
         this.logger.logError(error as Error);
-        if (attempt === this.retryAttempts) throw new StabilizeError(`Query failed: ${(error as Error).message}`, "QUERY_ERROR");
+        if (attempt === this.retryAttempts) {
+          throw new StabilizeError(`Query failed after ${this.retryAttempts} attempts: ${(error as Error).message}`, "QUERY_ERROR");
+        }
         await new Promise(res => setTimeout(res, this.retryDelay * Math.pow(2, attempt - 1) + this.getJitter()));
       }
     }
-    throw new StabilizeError("Query failed: no attempts made", "QUERY_ERROR");
+    // This line should theoretically be unreachable if retryAttempts >= 1
+    throw new StabilizeError("Query failed: maximum retries reached without success", "QUERY_ERROR");
   }
 
   /**
@@ -160,23 +172,23 @@ export class DBClient {
       const tx = this.client.transaction(() => callback(this));
       return tx();
     }
-    
+
     if (isMySQLPool(this.client)) {
-        const connection = await this.client.getConnection();
-        const txClient = new DBClient(this.config, this.logger, connection);
-        this.logger.logDebug("Starting MySQL transaction.");
-        try {
-            await txClient.query("START TRANSACTION");
-            const result = await callback(txClient);
-            await txClient.query("COMMIT");
-            return result;
-        } catch (error) {
-            await txClient.query("ROLLBACK");
-            throw error;
-        } finally {
-            connection.release();
-            this.logger.logDebug("MySQL transaction connection released.");
-        }
+      const connection = await this.client.getConnection();
+      const txClient = new DBClient(this.config, this.logger, connection);
+      this.logger.logDebug("Starting MySQL transaction.");
+      try {
+        await txClient.query("START TRANSACTION");
+        const result = await callback(txClient);
+        await txClient.query("COMMIT");
+        return result;
+      } catch (error) {
+        await txClient.query("ROLLBACK");
+        throw error;
+      } finally {
+        connection.release();
+        this.logger.logDebug("MySQL transaction connection released.");
+      }
     }
 
     if (this.client instanceof Pool) {
@@ -184,12 +196,12 @@ export class DBClient {
       const txClient = new DBClient(this.config, this.logger, connection);
       this.logger.logDebug("Starting Postgres transaction.");
       try {
-        await txClient.query("BEGIN");
+        await txClient.migrationQuery("BEGIN");
         const result = await callback(txClient);
-        await txClient.query("COMMIT");
+        await txClient.migrationQuery("COMMIT");
         return result;
       } catch (error) {
-        await txClient.query("ROLLBACK");
+        await txClient.migrationQuery("ROLLBACK");
         throw error;
       } finally {
         connection.release();
@@ -213,4 +225,46 @@ export class DBClient {
     this.client = null!;
     this.logger.logInfo("Database connection closed");
   }
+
+  /**
+  * Executes a SQL query for migrations/transactions that
+  * does NOT expect any result rows and returns void.
+  * This is used for DDL and transaction statements (e.g. CREATE TABLE, BEGIN, COMMIT)
+  * that should never be iterated over.
+  *
+  * Logs the execution time for each query.
+  *
+  * @param query The SQL query string with `?` as placeholders.
+  * @param params An array of parameters to bind to the query.
+  * @returns A promise that resolves when the query has executed.
+  * @example
+  * ```
+  * await dbClient.migrationQuery('CREATE TABLE ...');
+  * await dbClient.migrationQuery('BEGIN');
+  * await dbClient.migrationQuery('COMMIT');
+  * ```
+  */
+  async migrationQuery(query: string, params: any[] = []): Promise<void> {
+    const start = Date.now();
+    this.logger.logQuery(query, params);
+
+    if (this.client instanceof Database) { // SQLite
+      let stmt = this.preparedStatements.get(query);
+      if (!stmt) {
+        stmt = this.client.prepare(query);
+        this.preparedStatements.set(query, stmt);
+      }
+      stmt.run(...params);
+    } else if (isMySQLPool(this.client) || ('query' in this.client && 'release' in this.client && !(this.client instanceof Pool))) { // mysql2 Pool or Connection
+      await (this.client as mysql.Pool).query(query, params);
+    } else if (this.config.type = DBType.Postgres) { // Postgres Pool or Client
+      let paramIndex = 0;
+      const pgQuery = query.replace(/\?/g, () => `$${++paramIndex}`);
+      await (this.client as Pool).query(pgQuery, params);
+    }
+
+    const executionTime = Date.now() - start;
+    this.logger.logQuery(query, params, executionTime);
+  }
+
 }
