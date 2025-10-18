@@ -4,24 +4,24 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 
 ---
 
-**Stabilize** is a lightweight, feature-rich ORM designed for performance and developer experience. It provides a unified, database-agnostic API for **PostgreSQL**, **MySQL**, and **SQLite**. Powered by a robust query builder, elegant decorator-based models, automatic versioning, and a full-featured command-line interface, Stabilize is built to scale with your app.
+**Stabilize** is a lightweight, feature-rich ORM designed for performance and developer experience. It provides a unified, database-agnostic API for **PostgreSQL**, **MySQL**, and **SQLite**. Powered by a robust query builder, programmatic model definitions, automatic versioning, and a full-featured command-line interface, Stabilize is built to scale with your app.
 
 ---
 
 ## 🚀 Features
 
 - **Unified API**: Write once, run on PostgreSQL, MySQL, or SQLite.
-- **Type-Safe Decorators**: Define models and columns with the powerful `DataTypes` enum for true database-agnostic schemas.
+- **Programmatic Model Definitions**: Define models and columns using the `defineModel` API with the `DataTypes` enum for database-agnostic schemas.
 - **Full-Featured CLI**: Generate models, manage migrations, seed data, and reset your database from the command line with [stabilize-cli](https://github.com/ElectronSz/stabilize-cli).
 - **Automatic Migrations**: Generate database-specific SQL schemas directly from your model definitions.
-- **Versioned Models & Time-Travel**: Add `@Versioned()` to your models for automatic history tables and snapshot queries.
+- **Versioned Models & Time-Travel**: Enable versioning in your model configuration for automatic history tables and snapshot queries.
 - **Retry Logic**: Automatic exponential backoff for database queries to handle transient connection issues.
 - **Connection Pooling**: Efficient connection management for PostgreSQL and MySQL.
 - **Transactional Integrity**: Built-in support for atomic transactions with automatic rollback on failure.
 - **Advanced Query Builder**: Fluent, chainable API for building complex queries, including joins, filters, ordering, and pagination.
-- **Model Relationships**: Use `OneToOne`, `ManyToOne`, `OneToMany`, and `ManyToMany` decorators for relationships.
-- **Soft Deletes**: Add `@SoftDelete()` to your model for transparent "deleted" flags and safe row removal.
-- **Lifecycle Hooks**: Use the `@Hook()` decorator for model lifecycle events like `beforeCreate`, `afterUpdate`, etc.
+- **Model Relationships**: Define `OneToOne`, `ManyToOne`, `OneToMany`, and `ManyToMany` relationships in the model configuration.
+- **Soft Deletes**: Enable soft deletes in the model configuration for transparent "deleted" flags and safe row removal.
+- **Lifecycle Hooks**: Define hooks in the model configuration or as class methods for lifecycle events like `beforeCreate`, `afterUpdate`, etc.
 - **Pluggable Logging**: Includes a robust `ConsoleLogger` with support for file-based, rotating logs.
 - **Custom Errors**: `StabilizeError` provides clear, consistent error handling.
 - **Caching Layer**: Optional Redis-backed caching with `cache-aside` and `write-through` strategies.
@@ -34,10 +34,10 @@ Stabilize ORM requires a modern JavaScript runtime (Bun v1.3+).
 
 ```bash
 # Using Bun
-bun add stabilize-orm reflect-metadata
+bun add stabilize-orm
 
 # Using npm
-npm install stabilize-orm reflect-metadata
+npm install stabilize-orm
 ```
 
 ---
@@ -56,14 +56,14 @@ npm install stabilize-orm reflect-metadata
 
 ## ⚙️ Configuration
 
-First, create a database configuration file.
+Create a database configuration file.
 
 ```typescript
 // config/database.ts
 import { DBType, type DBConfig } from "stabilize-orm";
 
 const dbConfig: DBConfig = {
-  type: DBType.Postgres, 
+  type: DBType.Postgres,
   connectionString: process.env.DATABASE_URL || "postgres://user:password@localhost:5432/mydb",
   retryAttempts: 3,
   retryDelay: 1000,
@@ -72,11 +72,10 @@ const dbConfig: DBConfig = {
 export default dbConfig;
 ```
 
-Next, create a central ORM instance that your application can use. Import `reflect-metadata` once at your application's entry point.
+Next, create a central ORM instance for your application.
 
 ```typescript
 // db.ts
-import 'reflect-metadata';
 import { Stabilize, type CacheConfig, type LoggerConfig, LogLevel } from "stabilize-orm";
 import dbConfig from "./database";
 
@@ -88,7 +87,7 @@ const cacheConfig: CacheConfig = {
 
 const loggerConfig: LoggerConfig = {
   level: LogLevel.Info,
-  filePath: 'logs/stabilize.log',
+  filePath: "logs/stabilize.log",
   maxFileSize: 5 * 1024 * 1024, // 5MB
   maxFiles: 3,
 };
@@ -100,80 +99,95 @@ export const orm = new Stabilize(dbConfig, cacheConfig, loggerConfig);
 
 ## 🏗️ Models & Relationships
 
-Define your tables as classes using decorators. The `@Column` decorator uses the `DataTypes` enum for a truly database-agnostic schema.
+Define your tables as classes using the `defineModel` function. The `DataTypes` enum ensures database-agnostic schemas.
 
 ### Example: Users and Roles (Many-to-Many) with Versioning
 
 ```typescript
 // models/User.ts
-import 'reflect-metadata';
-import { Model, Column, DataTypes, Required, Unique, OneToMany, Versioned } from 'stabilize-orm';
-import { UserRole } from './UserRole';
+import { defineModel, DataTypes, RelationType } from "stabilize-orm";
+import { UserRole } from "./UserRole";
 
-@Model('users')
-@Versioned() // Enables history table for time-travel/audit
-export class User {
-  @Column({ type: DataTypes.INTEGER, name: 'id' })
-  id!: number;
+const User = defineModel({
+  tableName: "users",
+  versioned: true,
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    email: { type: DataTypes.String, length: 100, required: true, unique: true },
+  },
+  relations: [
+    {
+      type: RelationType.OneToMany,
+      target: () => UserRole,
+      property: "roles",
+      foreignKey: "userId",
+    },
+  ],
+  hooks: {
+    beforeCreate: (entity) => console.log(`Creating user: ${entity.email}`),
+  },
+});
 
-  @Column({ type: DataTypes.STRING, length: 100 })
-  @Required() @Unique()
-  email!: string;
+// Add a hook as a class method
+User.prototype.afterCreate = async function () {
+  console.log(`Created user with ID: ${this.id}`);
+};
 
-  @OneToMany(() => UserRole, 'user')
-  roles?: UserRole[];
-}
+export { User };
 ```
 
 ```typescript
 // models/Role.ts
-import 'reflect-metadata';
-import { Model, Column, DataTypes, Required, Unique } from 'stabilize-orm';
+import { defineModel, DataTypes } from "stabilize-orm";
 
-@Model('roles')
-export class Role {
-  @Column({ type: DataTypes.INTEGER, name: 'id' })
-  id!: number;
+const Role = defineModel({
+  tableName: "roles",
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    name: { type: DataTypes.String, length: 50, required: true, unique: true },
+  },
+});
 
-  @Column({ type: DataTypes.STRING, length: 50 })
-  @Required() @Unique()
-  name!: string;
-}
+export { Role };
 ```
 
 ```typescript
 // models/UserRole.ts
-import 'reflect-metadata';
-import { Model, Column, DataTypes, Required, ManyToOne, Index } from 'stabilize-orm';
-import { User } from './User';
-import { Role } from './Role';
+import { defineModel, DataTypes, RelationType } from "stabilize-orm";
+import { User } from "./User";
+import { Role } from "./Role";
 
-@Model('user_roles')
-export class UserRole {
-  @Column({ type: DataTypes.INTEGER, name: 'id' })
-  id!: number;
+const UserRole = defineModel({
+  tableName: "user_roles",
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    userId: { type: DataTypes.Integer, required: true, index: "idx_user_id" },
+    roleId: { type: DataTypes.Integer, required: true, index: "idx_role_id" },
+  },
+  relations: [
+    {
+      type: RelationType.ManyToOne,
+      target: () => User,
+      property: "user",
+      foreignKey: "userId",
+    },
+    {
+      type: RelationType.ManyToOne,
+      target: () => Role,
+      property: "role",
+      foreignKey: "roleId",
+    },
+  ],
+});
 
-  @Column({ type: DataTypes.INTEGER, name: 'user_id' })
-  @Required() @Index()
-  userId!: number;
-
-  @Column({ type: DataTypes.INTEGER, name: 'role_id' })
-  @Required() @Index()
-  roleId!: number;
-
-  @ManyToOne(() => User, 'userId')
-  user?: User;
-
-  @ManyToOne(() => Role, 'roleId')
-  role?: Role;
-}
+export { UserRole };
 ```
 
 ---
 
 ## ⏳ Versioning & Auditing
 
-Enable automatic history tracking and time-travel queries by adding `@Versioned()` to your model.
+Enable automatic history tracking and time-travel queries by setting `versioned: true` in your model configuration.
 
 - Each change is recorded in a `<table>_history` table with version, operation, and audit columns.
 - Supports snapshot queries, rollbacks, audits, and time-travel.
@@ -181,15 +195,16 @@ Enable automatic history tracking and time-travel queries by adding `@Versioned(
 ### **Versioning Example**
 
 ```typescript
-@Model('users')
-@Versioned()
-export class User {
-  @Column({ type: DataTypes.INTEGER, name: 'id' })
-  id!: number;
+import { defineModel, DataTypes } from "stabilize-orm";
 
-  @Column({ type: DataTypes.STRING, length: 100 })
-  name!: string;
-}
+const User = defineModel({
+  tableName: "users",
+  versioned: true,
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    name: { type: DataTypes.String, length: 100 },
+  },
+});
 
 // --- Using versioning features:
 
@@ -199,7 +214,7 @@ const userRepository = orm.getRepository(User);
 await userRepository.rollback(1, 3); // roll back user with id=1 to version 3
 
 // Get a snapshot as of a specific date
-const userAsOf = await userRepository.asOf(1, new Date('2025-01-01T00:00:00Z'));
+const userAsOf = await userRepository.asOf(1, new Date("2025-01-01T00:00:00Z"));
 console.log(userAsOf);
 
 // View full version history
@@ -211,46 +226,43 @@ console.log(history);
 
 ## 🔄 Model Lifecycle Hooks
 
-Stabilize ORM supports lifecycle hooks via the `@Hook()` decorator.  
-You can run logic before/after create, update, delete, or save.
+Stabilize ORM supports lifecycle hooks defined in the model configuration or as class methods. You can run logic before/after create, update, delete, or save.
 
 ### **Hooks Example**
 
 ```typescript
-import { Model, Column, DataTypes, Hook } from 'stabilize-orm';
+import { defineModel, DataTypes } from "stabilize-orm";
 
-@Model('users')
-export class User {
-  @Column({ type: DataTypes.INTEGER, name: 'id' })
-  id!: number;
+const User = defineModel({
+  tableName: "users",
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    name: { type: DataTypes.String, length: 100 },
+    createdAt: { type: DataTypes.DateTime },
+    updatedAt: { type: DataTypes.DateTime },
+  },
+  hooks: {
+    beforeCreate: (entity) => {
+      entity.createdAt = new Date();
+    },
+    beforeUpdate: (entity) => {
+      entity.updatedAt = new Date();
+    },
+    afterCreate: (entity) => {
+      console.log(`User created: ${entity.name}`);
+    },
+  },
+});
 
-  @Column({ type: DataTypes.STRING, length: 100 })
-  name!: string;
+// Add a hook as a class method
+User.prototype.afterUpdate = async function () {
+  console.log(`Updated user: ${this.name}`);
+};
 
-  @Column({ type: DataTypes.DATETIME, name: 'created_at' })
-  createdAt!: Date;
-
-  @Column({ type: DataTypes.DATETIME, name: 'updated_at' })
-  updatedAt!: Date;
-
-  @Hook('beforeCreate')
-  setCreatedAt() {
-    this.createdAt = new Date();
-  }
-
-  @Hook('beforeUpdate')
-  setUpdatedAt() {
-    this.updatedAt = new Date();
-  }
-
-  @Hook('afterCreate')
-  logCreate() {
-    console.log(`User created: ${this.name}`);
-  }
-}
+export { User };
 ```
 
-You can use `@Hook` with: `'beforeCreate'`, `'afterCreate'`, `'beforeUpdate'`, `'afterUpdate'`, `'beforeDelete'`, `'afterDelete'`, `'beforeSave'`, `'afterSave'`.
+Supported hooks: `beforeCreate`, `afterCreate`, `beforeUpdate`, `afterUpdate`, `beforeDelete`, `afterDelete`, `beforeSave`, `afterSave`.
 
 ---
 
@@ -309,21 +321,22 @@ Stabilize includes a powerful CLI for managing your workflow. See: [stabilize-cl
 ### Basic CRUD with Repositories
 
 ```typescript
-import { orm } from './db';
-import { User } from 'models/User';
+import { orm } from "./db";
+import { User } from "./models/User";
 
 const userRepository = orm.getRepository(User);
 
-const newUser = await userRepository.create({ email: 'lwazicd@icloud.com' });
+const newUser = await userRepository.create({ email: "lwazicd@icloud.com" });
 const foundUser = await userRepository.findOne(newUser.id);
-const updatedUser = await userRepository.update(newUser.id, { email: 'admin@offbytesecure.com' });
+const updatedUser = await userRepository.update(newUser.id, { email: "admin@offbytesecure.com" });
 await userRepository.delete(newUser.id);
 ```
 
 ### Advanced Queries with the Query Builder
 
 ```typescript
-const activeAdmins = await orm.getRepository(UserRole)
+const activeAdmins = await orm
+  .getRepository(UserRole)
   .find()
   .join("users", "user_roles.user_id = users.id")
   .join("roles", "user_roles.role_id = roles.id")
@@ -354,9 +367,32 @@ console.log(activeAdmins);
 
 ## 🗑️ Soft Deletes
 
-Add `@SoftDelete()` to a model property to enable transparent soft deletes (e.g., `deleted_at` timestamp).
-- Use `repository.softDelete(id)` to mark an entity as deleted.
-- Use `find({ includeDeleted: true })` to include soft-deleted rows.
+Enable soft deletes by setting `softDelete: true` and marking a column (e.g., `deletedAt`) with `softDelete: true` in the model configuration.
+
+- Use `repository.delete(id)` to mark an entity as deleted.
+- Use `repository.recover(id)` to restore a soft-deleted entity.
+- Queries automatically exclude soft-deleted rows unless specified otherwise.
+
+### **Soft Delete Example**
+
+```typescript
+import { defineModel, DataTypes } from "stabilize-orm";
+
+const User = defineModel({
+  tableName: "users",
+  softDelete: true,
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    email: { type: DataTypes.String, length: 100, required: true },
+    deletedAt: { type: DataTypes.DateTime, softDelete: true },
+  },
+});
+
+const userRepository = orm.getRepository(User);
+await userRepository.create({ email: "lwazicd@icloud.com" });
+await userRepository.delete(1); // Soft delete
+await userRepository.recover(1); // Recover
+```
 
 ---
 
@@ -416,6 +452,6 @@ Licensed under the MIT License. See [LICENSE.md](./LICENSE.md) for details.
 
 Created with ❤️ by **ElectronSz**
 <br/>
-<em>File last updated: 2025-10-16 19:41:00 UTC</em>
+<em>File last updated: 2025-10-18 22:10:00 SAST</em>
 
 </div>
