@@ -6,17 +6,12 @@
  */
 
 import { DBClient } from "./client";
-import { ModelKey, ColumnKey, ValidatorKey, SoftDeleteKey, VersionedKey } from "./decorators";
+import { MetadataStorage } from "./model";
 import { type DBConfig, type Migration, StabilizeError, DBType, DataTypes } from "./types";
-
-type ColumnData = { name: string; type: string };
-type ColumnMetadata = Record<string, ColumnData>;
-type ValidatorMetadata = Record<string, string[]>;
 
 /**
  * @internal
  * Formats a SQL query with placeholders for the target database dialect.
- * Replaces '?' with '$1', '$2', etc. for PostgreSQL.
  * @param query The SQL query string with '?' placeholders.
  * @param dbType The target database dialect.
  * @returns The formatted SQL query string.
@@ -30,17 +25,10 @@ function formatQuery(query: string, dbType: DBType): string {
 }
 
 /**
- * Maps an abstract data type (from DataTypes enum or a string) to the correct SQL type string
- * for the specified database dialect (Postgres, MySQL, or SQLite).
- *
- * This function enables model definitions to be portable across different databases by
- * converting each logical type to its proper SQL type in CREATE TABLE migrations.
- *
- * @param dt - The data type to map. Accepts either a value from the DataTypes enum, or a string
- *             (e.g., "string", "integer", "boolean", etc.).
- * @param dbType - The target database dialect (DBType.Postgres, DBType.MySQL, or DBType.SQLite).
- * @returns The SQL column type string appropriate for the database and logical type.
- *
+ * Maps an abstract data type to the correct SQL type string for the specified database dialect.
+ * @param dt The data type to map.
+ * @param dbType The target database dialect.
+ * @returns The SQL column type string.
  */
 function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
   let type: string;
@@ -86,7 +74,6 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
       default: return "TEXT";
     }
   }
-  // SQLite
   if (dbType === DBType.SQLite) {
     switch (type) {
       case "string": return "TEXT";
@@ -127,14 +114,10 @@ function getAutoIncrementPK(dbType: DBType): string {
 }
 
 /**
- * Generates SQL migration scripts (`up` and `down`) based on a model's decorators.
- * This function reads the metadata from a model class to create a `CREATE TABLE` statement.
- *
- * If the model is versioned (has @Versioned), also generates a history table for time-travel queries.
- *
- * @param model The model class decorated with `@Model` and `@Column`.
- * @param name A descriptive name for the migration (used for the migration object).
- * @param dbType The target database dialect to generate SQL for. Defaults to Postgres.
+ * Generates SQL migration scripts (`up` and `down`) based on a model's configuration.
+ * @param model The model class defined with `defineModel`.
+ * @param name A descriptive name for the migration.
+ * @param dbType The target database dialect.
  * @returns A promise that resolves to a `Migration` object containing the `up` and `down` SQL scripts.
  */
 export async function generateMigration(
@@ -142,14 +125,14 @@ export async function generateMigration(
   name: string,
   dbType: DBType,
 ): Promise<Migration> {
-  const tableName = Reflect.getMetadata(ModelKey, model);
+  const tableName = MetadataStorage.getTableName(model);
   if (!tableName) {
-    throw new StabilizeError("Model not decorated with @Model", "MIGRATION_ERROR");
+    throw new StabilizeError("Model not defined with tableName", "MIGRATION_ERROR");
   }
 
-  const columns: ColumnMetadata = Reflect.getMetadata(ColumnKey, model.prototype) || {};
-  const validators: ValidatorMetadata = Reflect.getMetadata(ValidatorKey, model.prototype) || {};
-  const versioned: boolean = !!Reflect.getMetadata(VersionedKey, model);
+  const columns = MetadataStorage.getColumns(model);
+  const validators = MetadataStorage.getValidators(model);
+  const versioned = MetadataStorage.isVersioned(model);
 
   const columnDefs: string[] = [];
 
@@ -160,7 +143,7 @@ export async function generateMigration(
       defParts.push("id");
       defParts.push(getAutoIncrementPK(dbType));
     } else {
-      defParts.push(col.name);
+      defParts.push(col.name || key);
       defParts.push(mapDataTypeToSql(col.type, dbType));
     }
 
@@ -170,6 +153,12 @@ export async function generateMigration(
     if (validators[key]?.includes("unique")) {
       defParts.push("UNIQUE");
     }
+    if (col.defaultValue !== undefined) {
+      defParts.push(`DEFAULT ${JSON.stringify(col.defaultValue)}`);
+    }
+    if (col.index) {
+      defParts.push(`INDEX ${col.index}`);
+    }
 
     columnDefs.push(defParts.join(" "));
   }
@@ -177,7 +166,6 @@ export async function generateMigration(
   const up: string[] = [`CREATE TABLE IF NOT EXISTS ${tableName} (${columnDefs.join(", ")})`];
   const down: string[] = [`DROP TABLE IF EXISTS ${tableName}`];
 
-  // If model is versioned, add history table migration
   if (versioned) {
     const [historyUp, historyDown] = generateHistoryMigration(tableName, columnDefs, dbType);
     up.push(historyUp);
@@ -223,7 +211,7 @@ function generateHistoryMigration(
 
 /**
  * @internal
- * Gets the database-specific SQL for creating the `migrations` table, which tracks applied migrations.
+ * Gets the database-specific SQL for creating the `migrations` table.
  * @param dbType The target database dialect.
  * @returns The SQL string for the `CREATE TABLE` statement.
  */
@@ -253,9 +241,6 @@ function getMigrationsTableSQL(dbType: DBType): string {
 
 /**
  * Connects to the database and runs all pending migrations.
- * It tracks which migrations have been applied by using a `migrations` table in the database.
- * Each migration is run within a transaction to ensure atomicity.
- *
  * @param config The database configuration object.
  * @param migrations An array of `Migration` objects to be executed.
  */

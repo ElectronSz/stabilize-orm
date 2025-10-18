@@ -9,24 +9,6 @@ import { type Logger, ConsoleLogger } from "./logger";
 import { QueryBuilder } from "./query-builder";
 import { Repository } from "./repository";
 import { runMigrations, generateMigration, type Migration } from "./migrations";
-import { Hook } from "./hooks";
-import {
-  Model,
-  Column,
-  Required,
-  Unique,
-  SoftDelete,
-  OneToOne,
-  ManyToOne,
-  OneToMany,
-  ManyToMany,
-  ModelKey,
-  ColumnKey,
-  ValidatorKey,
-  Versioned,
-  RelationKey,
-  SoftDeleteKey,
-} from "./decorators";
 import {
   type DBConfig,
   type CacheConfig,
@@ -40,7 +22,8 @@ import {
   type CacheStats,
   LogLevel,
 } from "./types";
-
+import { defineModel } from "./model";
+import type { Hook } from "./hooks";
 
 export class Stabilize {
   public client: DBClient;
@@ -68,7 +51,7 @@ export class Stabilize {
 
   /**
    * Gets a repository for a given model, used to perform CRUD operations.
-   * @param model The model class, which must be decorated with `@Model`.
+   * @param model The model class, defined using `defineModel`.
    * @returns A new `Repository` instance for the specified model.
    * @example
    * ```
@@ -99,7 +82,6 @@ export class Stabilize {
    * try {
    *   await stabilize.transaction(async (txClient) => {
    *     const newUser = await userRepo.create({ name: 'Ciniso Dlamini' }, {}, txClient);
-   *     // The new user's ID is needed for the profile, linking the operations.
    *     await profileRepo.create({ userId: newUser.id, bio: 'A new bio' }, {}, txClient);
    *   });
    *   console.log('User and profile created successfully.');
@@ -151,28 +133,13 @@ export {
   Cache,
   ConsoleLogger,
   DBType,
-  DataTypes, 
+  DataTypes,
   LogLevel,
   RelationType,
   StabilizeError,
-  Model,
-  Column,
-  Required,
-  Unique,
-  SoftDelete,
-  Versioned,
-  Hook,
-  OneToOne,
-  ManyToOne,
-  OneToMany,
-  ManyToMany,
-  ModelKey,
-  ColumnKey,
-  ValidatorKey,
-  RelationKey,
-  SoftDeleteKey,
   runMigrations,
   generateMigration,
+  defineModel,
 };
 
 export type {
@@ -184,4 +151,5 @@ export type {
   PoolMetrics,
   CacheStats,
   Logger,
+  Hook
 };

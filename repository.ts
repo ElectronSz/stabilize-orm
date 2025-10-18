@@ -9,23 +9,16 @@ import { DBClient } from "./client";
 import { ConsoleLogger, type Logger } from "./logger";
 import { QueryBuilder } from "./query-builder";
 import {
+  DataTypes,
   DBType,
   RelationType,
   StabilizeError,
   type CacheConfig,
 } from "./types";
-import {
-  ModelKey,
-  ColumnKey,
-  ValidatorKey,
-  RelationKey,
-  SoftDeleteKey,
-  VersionedKey,
-} from "./decorators";
+import { MetadataStorage } from "./model";
 import { getHooks, type HookType } from "./hooks";
 
 type VersionOperation = "insert" | "update" | "delete";
-
 
 /**
  * Provides a generic repository for a model `T`.
@@ -57,7 +50,7 @@ export class Repository<T> {
   /**
    * Creates an instance of Repository.
    * @param client The database client instance for executing queries.
-   * @param model The model class constructor, decorated with `@Model`.
+   * @param model The model class constructor, defined with `defineModel`.
    * @param cacheConfig Optional configuration for caching.
    * @param logger A logger instance for logging messages.
    */
@@ -69,14 +62,30 @@ export class Repository<T> {
   ) {
     this.client = client;
     this.cache = cacheConfig.enabled ? new Cache(cacheConfig, logger) : null;
-    this.table = Reflect.getMetadata(ModelKey, model) || "";
-    this.columns = Reflect.getMetadata(ColumnKey, model.prototype) || {};
-    this.validators = Reflect.getMetadata(ValidatorKey, model.prototype) || {};
-    this.relations = Reflect.getMetadata(RelationKey, model.prototype) || {};
-    this.softDeleteField =
-      Reflect.getMetadata(SoftDeleteKey, model.prototype) || null;
+    this.table = MetadataStorage.getTableName(model);
+    this.columns = Object.fromEntries(
+      Object.entries(MetadataStorage.getColumns(model)).map(([key, col]) => [
+        key,
+        { name: col.name ?? key, type: typeof col.type === 'string' ? col.type : DataTypes[col.type] },
+      ])
+    );
+    this.relations = Object.fromEntries(
+      Object.entries(MetadataStorage.getRelations(model)).map(([key, rel]) => [
+        key,
+        {
+          type: rel.type,
+          targetModel: rel.target,
+          foreignKey: rel.foreignKey,
+          inverseKey: rel.inverseKey,
+          joinTable: rel.joinTable,
+        },
+      ])
+    );
+    this.validators = MetadataStorage.getValidators(model);
+
+    this.softDeleteField = MetadataStorage.getSoftDeleteField(model);
     this.logger = logger;
-    this.versioned = !!Reflect.getMetadata(VersionedKey, model);
+    this.versioned = MetadataStorage.isVersioned(model);
     this.historyTable = `${this.table}_history`;
   }
 
@@ -93,7 +102,7 @@ export class Repository<T> {
 
   /**
    * @internal
-   * Validates an entity against the 'required' constraints defined in decorators.
+   * Validates an entity against the 'required' constraints defined in the model configuration.
    * @param entity The partial entity to validate.
    */
   private validate(entity: Partial<T>) {
@@ -112,13 +121,13 @@ export class Repository<T> {
   }
 
   /**
-  * Runs lifecycle hooks of a given type for the entity.
-  * @param entity The entity instance.
-  * @param type The hook type (e.g., 'beforeCreate').
-  */
+   * Runs lifecycle hooks of a given type for the entity.
+   * @param entity The entity instance.
+   * @param type The hook type (e.g., 'beforeCreate').
+   */
   private async runHooks(entity: any, type: HookType): Promise<void> {
     for (const hook of getHooks(entity, type)) {
-      await hook();
+      await hook.callback(entity);
     }
   }
 
@@ -173,8 +182,8 @@ export class Repository<T> {
   }
 
   /**
- * Snapshot query: get record as it was at a point in time.
- */
+   * Snapshot query: get record as it was at a point in time.
+   */
   async asOf(
     id: number | string,
     asOfDate: Date,
@@ -190,8 +199,8 @@ export class Repository<T> {
   }
 
   /**
- * Get all history for a record.
- */
+   * Get all history for a record.
+   */
   async history(
     id: number | string,
     _client?: DBClient
@@ -203,8 +212,6 @@ export class Repository<T> {
       [id]
     );
   }
-
-
 
   /**
    * Rollback a record to a previous version.
@@ -237,21 +244,12 @@ export class Repository<T> {
     });
   }
 
-
   /**
    * Writes a versioned history row for the entity to the history table.
-   *
-   * This method maps entity property keys to their corresponding SQL column names
-   * (as defined in metadata) to ensure that inserts match the schema for all supported
-   * databases (Postgres, MySQL, SQLite).
-   *
-   * This function works for Postgres, MySQL, and SQLite, and uses positional parameters
-   * (properly formatted for the target database) for safety and compatibility.
-   *
-   * @param entity - The entity object being versioned
-   * @param operation - The operation performed ("insert", "update", "delete")
-   * @param client - The database client to use for the insert
-   * @param user - The user/system responsible for the change (default: "system")
+   * @param entity The entity object being versioned
+   * @param operation The operation performed ("insert", "update", "delete")
+   * @param client The database client to use for the insert
+   * @param user The user/system responsible for the change (default: "system")
    */
   private async writeHistory(
     entity: any,
@@ -261,11 +259,9 @@ export class Repository<T> {
   ) {
     if (!this.versioned) return;
 
-    // Get property keys and corresponding SQL column names
     const propertyKeys = Object.keys(this.columns);
     const sqlColumnNames = propertyKeys.map((k) => this.columns[k]!.name);
 
-    // Build historyColumns using SQL column names
     const historyColumns = [
       ...sqlColumnNames,
       "operation",
@@ -276,9 +272,7 @@ export class Repository<T> {
       "modified_at"
     ];
 
-    // Map values from entity using property keys
     const values = propertyKeys.map((k) => entity[k]);
-
     const params = [
       ...values,
       operation,
@@ -288,7 +282,7 @@ export class Repository<T> {
       user || "system",
       new Date()
     ];
-    // Database-agnostic placeholder formatting
+
     let placeholders: string;
     if (client.config.type === DBType.Postgres) {
       placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
@@ -332,6 +326,7 @@ export class Repository<T> {
       return result;
     });
   }
+
   /**
    * @internal
    * The private implementation for creating a record, executed within a transaction.
@@ -407,7 +402,6 @@ export class Repository<T> {
     options: { relations?: string[]; batchSize?: number } = {},
   ): Promise<T[]> {
     return this.client.transaction(async (txClient) => {
-      // Prepare entity instances for hooks
       const preparedEntities = entities.map(data => {
         const instance = new (this as any).model();
         Object.assign(instance, data);
@@ -464,7 +458,6 @@ export class Repository<T> {
       );
 
       if (dbType === DBType.Postgres) {
-        // PostgreSQL: numbered placeholders ($1, $2, ...)
         let paramIdx = 1;
         const valuePlaceholders = batch
           .map(
@@ -476,7 +469,6 @@ export class Repository<T> {
         const batchResults = await client.query<T>(query, params);
         const ids = batchResults.map((r) => (r as any).id);
 
-        // Handle relation loading if needed
         let finalResults = batchResults;
         if (ids.length > 0 && batchResults.length === 0) {
           const queryBuilder = this.find().where(
@@ -493,7 +485,6 @@ export class Repository<T> {
         results.push(...finalResults);
 
       } else {
-        // SQLite/MySQL: ? placeholders
         const placeholders = `(${keys.map(() => "?").join(", ")})`;
         query = `INSERT INTO ${this.table} (${columnNames}) VALUES ${batch.map(() => placeholders).join(", ")}`;
         await client.query(query, params);
@@ -642,17 +633,14 @@ export class Repository<T> {
     for (let i = 0; i < updates.length; i += batchSize) {
       const batch = updates.slice(i, i + batchSize);
       for (const update of batch) {
-        // Find all IDs matching the where clause
         const rows = await client.query<{ id: number | string }>(
           `SELECT id FROM ${this.table} WHERE ${update.where.condition}${this.softDeleteField ? ` AND ${this.softDeleteField} IS NULL` : ""}`,
           update.where.params,
         );
         for (const { id } of rows) {
-          // Fetch record before update for versioning
           const before = await this.findOne(id, {}, client);
           if (!before) continue;
 
-          // Prepare instance for hooks
           const instance = new ((this as any).model || Object)();
           Object.assign(instance, before, update.set);
 
@@ -693,6 +681,7 @@ export class Repository<T> {
       `Bulk updated ${updates.length} ${this.table} entities in ${(performance.now() - start).toFixed(2)}ms`,
     );
   }
+
   /**
    * Performs an "update or insert" operation based on a set of unique keys.
    * @param entity The entity to upsert.
@@ -728,6 +717,7 @@ export class Repository<T> {
     const columns = Object.keys(entity).filter((k) => this.columns[k]);
     const columnNames = columns.map((k) => this.columns[k]?.name).join(", ");
     const placeholders = columns.map(() => "?").join(", ");
+
     const updateClause = columns
       .filter((c) => !keys.includes(c))
       .map((c) => `${this.columns[c]?.name} = ?`).join(", ");
@@ -737,7 +727,6 @@ export class Repository<T> {
     const insertParams = columns.map((k) => (entity as any)[k]);
     let params = [...insertParams, ...updateParams];
 
-    // Try to find the record before upsert
     let before: T | null = null;
     let isUpdate = false;
     if (this.versioned && keys.length > 0) {
@@ -751,7 +740,6 @@ export class Repository<T> {
       isUpdate = !!before;
     }
 
-    // Prepare instance for hooks
     const instance = new ((this as any).model || Object)();
     Object.assign(instance, before || {}, entity);
 
@@ -767,7 +755,7 @@ export class Repository<T> {
       query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON CONFLICT(${keys.map((k) => this.columns[k]!.name).join(", ")}) DO UPDATE SET ${updateClause}`;
     } else if (dbType === DBType.MySQL) {
       query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateClause}`;
-    } else { // PostgreSQL
+    } else {
       const pgUpdateClause = columns
         .filter((c) => !keys.includes(c))
         .map((c) => `${this.columns[c]?.name} = EXCLUDED.${this.columns[c]?.name}`).join(", ");
@@ -799,13 +787,6 @@ export class Repository<T> {
       await this.runHooks(result, "afterSave");
     }
 
-    if (this.cache) {
-      await this.cache.invalidatePattern(`find:${this.table}:*`);
-      if (this.cache.getStrategy() === "write-through") {
-        await this.cache.set(`findOne:${this.table}:${id}`, [result], 60);
-      }
-    }
-
     if (this.versioned) {
       await this.writeHistory(
         { ...result, version: before ? ((before as any).version ? (before as any).version + 1 : 1) : 1 },
@@ -814,11 +795,19 @@ export class Repository<T> {
       );
     }
 
+    if (this.cache) {
+      await this.cache.invalidatePattern(`find:${this.table}:*`);
+      if (this.cache.getStrategy() === "write-through") {
+        await this.cache.set(`findOne:${this.table}:${id}`, [result], 60);
+      }
+    }
+
     this.logger.logDebug(
       `Upserted ${this.table} with ID ${id} in ${(performance.now() - start).toFixed(2)}ms`,
     );
     return result;
   }
+
   /**
    * Deletes a record by its ID. Performs a soft delete if enabled on the model.
    * @param id The ID of the record to delete.
@@ -929,6 +918,7 @@ export class Repository<T> {
       `Bulk deleted ${ids.length} ${this.table} entities in ${(performance.now() - start).toFixed(2)}ms`,
     );
   }
+
   /**
    * Recovers a soft-deleted record by its ID.
    * Throws an error if soft delete is not enabled on the model.
@@ -1014,7 +1004,7 @@ export class Repository<T> {
         "RELATION_ERROR",
       );
 
-    const relatedTable = Reflect.getMetadata(ModelKey, rel.targetModel());
+    const relatedTable = MetadataStorage.getTableName(rel.targetModel());
     if (
       rel.type === RelationType.OneToOne ||
       rel.type === RelationType.ManyToOne
