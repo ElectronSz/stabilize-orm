@@ -6,6 +6,30 @@ All notable changes to this project will be documented in this file.
 
 - Further features and improvements coming soon.
 
+
+## [1.3.2] - 2025-10-19
+
+### Added
+- Added **Timestamps Configuration** feature for automatic management of `createdAt` and `updatedAt` columns (`types.ts`, `model.ts`, `repository.ts`, `migrations.ts`).
+  - Added `TimestampsConfig` interface and `timestamps` property to `ModelConfig` in `types.ts`.
+  - Added `getTimestamps` method to `MetadataStorage` in `model.ts`.
+  - Updated `create`, `update`, `bulkCreate`, `bulkUpdate`, and `upsert` methods in `repository.ts` to set timestamps automatically.
+  - Updated `migrations.ts` to include timestamp columns in schema generation.
+  - Updated `README.md` with a new "Timestamps" section and example.
+
+### Fixed
+- Fixed TypeScript error (TS7053) in `repository.ts` for timestamps handling in `_create`, `_bulkCreate`, `_bulkUpdate`, and `_upsert` methods by using `Record<string, any>` for safe property access and maintaining `Partial<T>` type safety.
+
+## [1.3.2] - 2025-10-19
+
+### Added
+- Added **Custom Query Scopes** feature, allowing reusable query conditions defined in model configurations (`types.ts`, `model.ts`, `query-builder.ts`, `repository.ts`).
+  - Added `scopes` property to `ModelConfig` interface in `types.ts` to define scope functions.
+  - Added `getScopes` method to `MetadataStorage` in `model.ts` to retrieve scope definitions.
+  - Added `scope` method to `QueryBuilder` in `query-builder.ts` to apply scopes to queries.
+  - Added `scope` method to `Repository` in `repository.ts` for direct scope application.
+  - Updated `README.md` with a new "Custom Query Scopes" section and example.
+
 ## [1.3.0] - 2025-10-18
 
 ### Added

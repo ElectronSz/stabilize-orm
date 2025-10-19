@@ -27,7 +27,7 @@ export interface Logger {
 /**
  * A logger implementation that writes to the console and can optionally write to rotating files.
  */
-export class ConsoleLogger implements Logger {
+export class StabilizeLogger implements Logger {
   private readonly level: LogLevel;
   private readonly filePath: string | null;
   private readonly maxFileSize: number;

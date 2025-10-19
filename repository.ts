@@ -6,7 +6,7 @@
 
 import { Cache } from "./cache";
 import { DBClient } from "./client";
-import { ConsoleLogger, type Logger } from "./logger";
+import { StabilizeLogger, type Logger } from "./logger";
 import { QueryBuilder } from "./query-builder";
 import {
   DataTypes,
@@ -58,7 +58,7 @@ export class Repository<T> {
     client: DBClient,
     model: new (...args: any[]) => T,
     cacheConfig: CacheConfig = { enabled: false, ttl: 60 },
-    logger: Logger = new ConsoleLogger(),
+    logger: Logger = new StabilizeLogger(),
   ) {
     this.client = client;
     this.cache = cacheConfig.enabled ? new Cache(cacheConfig, logger) : null;
@@ -148,16 +148,16 @@ export class Repository<T> {
     return qb;
   }
 
-    /**
-   * Applies a custom scope to the query for the repository's table.
-   * @param name The name of the scope to apply.
-   * @param args Optional arguments to pass to the scope function.
-   * @returns A `QueryBuilder` instance with the scope applied.
-   * @example
-   * ```
-   * const activeUsers = await userRepository.scope('active').execute(client);
-   * ```
-   */
+  /**
+ * Applies a custom scope to the query for the repository's table.
+ * @param name The name of the scope to apply.
+ * @param args Optional arguments to pass to the scope function.
+ * @returns A `QueryBuilder` instance with the scope applied.
+ * @example
+ * ```
+ * const activeUsers = await userRepository.scope('active').execute(client);
+ * ```
+ */
   scope(name: string, ...args: any[]): QueryBuilder<T> {
     this.logger.logDebug(`Applying scope ${name} to ${this.table}`);
     return this.find().scope(name, ...args);
@@ -357,10 +357,19 @@ export class Repository<T> {
     );
     this.validate(entity);
 
-    const keys = Object.keys(entity).filter((k) => this.columns[k]);
+    const timestamps = MetadataStorage.getTimestamps((this as any).model || Object);
+    const entityWithTimestamps = { ...entity } as Record<string, any>;
+    if (timestamps.createdAt && !entityWithTimestamps[timestamps.createdAt]) {
+      entityWithTimestamps[timestamps.createdAt] = new Date();
+    }
+    if (timestamps.updatedAt && !entityWithTimestamps[timestamps.updatedAt]) {
+      entityWithTimestamps[timestamps.updatedAt] = new Date();
+    }
+
+    const keys = Object.keys(entityWithTimestamps).filter((k) => this.columns[k]);
     const columnNames = keys.map((k) => this.columns[k]?.name).join(", ");
     const placeholders = keys.map(() => "?").join(", ");
-    const params = keys.map((k) => (entity as any)[k]);
+    const params = keys.map((k) => (entityWithTimestamps as any)[k]);
     let query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders})`;
 
     let insertedResult: T[] | undefined;
@@ -398,7 +407,6 @@ export class Repository<T> {
     );
     return result;
   }
-
   /**
    * Creates multiple records in the database in batches.
    * @param entities An array of entities to create.
@@ -459,11 +467,18 @@ export class Repository<T> {
     const batchSize = options.batchSize || 1000;
     entities.forEach((entity) => this.validate(entity));
 
+    const timestamps = MetadataStorage.getTimestamps((this as any).model || Object);
+    const entitiesWithTimestamps = entities.map(entity => ({
+      ...entity,
+      ...(timestamps.createdAt && !(entity as Record<string, any>)[timestamps.createdAt] ? { [timestamps.createdAt]: new Date() } : {}),
+      ...(timestamps.updatedAt && !(entity as Record<string, any>)[timestamps.updatedAt] ? { [timestamps.updatedAt]: new Date() } : {}),
+    })) as Partial<T>[];
+
     const dbType = this.getDBType(client);
     const results: T[] = [];
 
-    for (let i = 0; i < entities.length; i += batchSize) {
-      const batch = entities.slice(i, i + batchSize);
+    for (let i = 0; i < entitiesWithTimestamps.length; i += batchSize) {
+      const batch = entitiesWithTimestamps.slice(i, i + batchSize);
       const keys = Object.keys(batch[0]!).filter((k) => this.columns[k]);
       const columnNames = keys.map((k) => this.columns[k]?.name).join(", ");
 
@@ -498,7 +513,6 @@ export class Repository<T> {
           finalResults = await queryBuilder.execute(client);
         }
         results.push(...finalResults);
-
       } else {
         const placeholders = `(${keys.map(() => "?").join(", ")})`;
         query = `INSERT INTO ${this.table} (${columnNames}) VALUES ${batch.map(() => placeholders).join(", ")}`;
@@ -582,7 +596,13 @@ export class Repository<T> {
     this.logger.logDebug(`Updating ${this.table} with ID ${id}`);
     this.validate(entity);
 
-    const keys = Object.keys(entity).filter((k) => this.columns[k]);
+    const timestamps = MetadataStorage.getTimestamps((this as any).model || Object);
+    const entityWithTimestamps = { ...entity } as Record<string, any>;;
+    if (timestamps.updatedAt && !entityWithTimestamps[timestamps.updatedAt]) {
+      entityWithTimestamps[timestamps.updatedAt] = new Date();
+    }
+
+    const keys = Object.keys(entityWithTimestamps).filter((k) => this.columns[k]);
     const setClause = keys.map((k) => `${this.columns[k]?.name} = ?`).join(", ");
     const query = `UPDATE ${this.table} SET ${setClause} WHERE id = ?${this.softDeleteField ? ` AND ${this.softDeleteField} IS NULL` : ""}`;
     const params = [...keys.map((k) => (entity as any)[k]), id];
@@ -645,6 +665,8 @@ export class Repository<T> {
     const batchSize = options.batchSize || 1000;
     updates.forEach((update) => this.validate(update.set));
 
+    const timestamps = MetadataStorage.getTimestamps((this as any).model || Object);
+
     for (let i = 0; i < updates.length; i += batchSize) {
       const batch = updates.slice(i, i + batchSize);
       for (const update of batch) {
@@ -662,11 +684,16 @@ export class Repository<T> {
           await this.runHooks(instance, "beforeUpdate");
           await this.runHooks(instance, "beforeSave");
 
-          const keys = Object.keys(update.set).filter((k) => this.columns[k]);
+          const updateWithTimestamps = {
+            ...update.set,
+            ...(timestamps.updatedAt && !(update.set as Record<string, any>)[timestamps.updatedAt] ? { [timestamps.updatedAt]: new Date() } : {}),
+          } as Partial<T>;
+
+          const keys = Object.keys(updateWithTimestamps).filter((k) => this.columns[k]);
           const setClause = keys.map((k) => `${this.columns[k]?.name} = ?`).join(", ");
           const query = `UPDATE ${this.table} SET ${setClause} WHERE id = ?${this.softDeleteField ? ` AND ${this.softDeleteField} IS NULL` : ""}`;
           const params = [
-            ...keys.map((k) => (update.set as any)[k]),
+            ...keys.map((k) => (updateWithTimestamps as any)[k]),
             id,
           ];
           await client.query(query, params);

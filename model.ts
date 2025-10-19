@@ -5,7 +5,7 @@
  */
 
 import type { QueryBuilder } from './query-builder';
-import { DataTypes, RelationType, DBType } from './types';
+import { DataTypes, RelationType } from './types';
 
 // Interface for column configuration
 export interface ColumnConfig {
@@ -31,6 +31,11 @@ export interface RelationConfig {
     joinTable?: string;
 }
 
+export interface TimestampsConfig {
+    createdAt?: string;
+    updatedAt?: string;
+}
+
 // Interface for model configuration
 export interface ModelConfig {
     tableName: string;
@@ -39,7 +44,9 @@ export interface ModelConfig {
     columns: Record<string, ColumnConfig>;
     relations?: RelationConfig[];
     scopes?: Record<string, (qb: QueryBuilder<any>, ...args: any[]) => QueryBuilder<any>>; // Custom query scopes
+    timestamps?: TimestampsConfig; // Auto-managed timestamp columns
 }
+
 
 /**
  * Metadata storage for models.
@@ -145,6 +152,10 @@ export class MetadataStorage {
     static getScopes(model: Function): Record<string, (qb: QueryBuilder<any>, ...args: any[]) => QueryBuilder<any>> {
         return this.getModelMetadata(model)?.scopes || {};
     }
+
+    static getTimestamps(model: Function): TimestampsConfig {
+        return this.getModelMetadata(model)?.timestamps || {};
+    }
 }
 
 /**
@@ -171,6 +182,7 @@ export function defineModel(config: ModelConfig) {
         columns: config.columns,
         relations: config.relations || [],
         scopes: config.scopes || {},
+        timestamps: config.timestamps || {},
     });
 
     return Model;

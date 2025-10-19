@@ -22,10 +22,11 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 - **Model Relationships**: Define `OneToOne`, `ManyToOne`, `OneToMany`, and `ManyToMany` relationships in the model configuration.
 - **Soft Deletes**: Enable soft deletes in the model configuration for transparent "deleted" flags and safe row removal.
 - **Lifecycle Hooks**: Define hooks in the model configuration or as class methods for lifecycle events like `beforeCreate`, `afterUpdate`, etc.
-- **Pluggable Logging**: Includes a robust `ConsoleLogger` with support for file-based, rotating logs.
+- **Pluggable Logging**: Includes a robust `StabilizeLogger` with support for file-based, rotating logs.
 - **Custom Errors**: `StabilizeError` provides clear, consistent error handling.
 - **Caching Layer**: Optional Redis-backed caching with `cache-aside` and `write-through` strategies.
 - **Custom Query Scopes**: Define reusable query conditions (scopes) in models for simplified, reusable filtering logic.
+- **Timestamps**: Automatically manage `createdAt` and `updatedAt` columns for tracking record creation and update times.
 
 ---
 
@@ -382,6 +383,7 @@ const User = defineModel({
     email: { type: DataTypes.String, length: 100, required: true },
     isActive: { type: DataTypes.Boolean, required: true },
     createdAt: { type: DataTypes.DateTime },
+    updatedAt: { type: DataTypes.DateTime },
   },
   scopes: {
     active: (qb) => qb.where("isActive = ?", true),
@@ -406,6 +408,48 @@ const recentActiveUsers = await userRepository
   .execute();
 
 console.log(recentActiveUsers);
+```
+
+### Timestamps
+
+Enable automatic management of `createdAt` and `updatedAt` columns by setting `timestamps` in your model configuration. The ORM automatically sets these fields during `create`, `update`, `bulkCreate`, `bulkUpdate`, and `upsert` operations in a TypeScript-safe manner, eliminating the need for manual hooks.
+
+#### **Timestamps Example**
+
+```typescript
+import { defineModel, DataTypes } from "stabilize-orm";
+import { orm } from "./db";
+
+const User = defineModel({
+  tableName: "users",
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    email: { type: DataTypes.String, length: 100, required: true },
+    createdAt: { type: DataTypes.DateTime },
+    updatedAt: { type: DataTypes.DateTime },
+  },
+  timestamps: {
+    createdAt: "createdAt",
+    updatedAt: "updatedAt",
+  },
+});
+
+const userRepository = orm.getRepository(User);
+
+// Create a user (createdAt and updatedAt set automatically)
+const newUser = await userRepository.create({ email: "lwazicd@icloud.com" });
+console.log(newUser.createdAt, newUser.updatedAt); // Outputs current timestamp
+
+// Update a user (updatedAt updated automatically)
+const updatedUser = await userRepository.update(newUser.id, { email: "admin@offbytesecure.com" });
+console.log(updatedUser.updatedAt); // Outputs new timestamp
+
+// Bulk create users
+const newUsers = await userRepository.bulkCreate([
+  { email: "user1@example.com" },
+  { email: "user2@example.com" },
+]);
+console.log(newUsers.map(u => u.createdAt)); // Outputs timestamps for each user
 ```
 
 ---
@@ -497,6 +541,6 @@ Licensed under the MIT License. See [LICENSE.md](./LICENSE.md) for details.
 
 Created with ❤️ by **ElectronSz**
 <br/>
-<em>File last updated: 2025-10-19 10:24:00 SAST</em>
+<em>File last updated: 2025-10-19 11:12:00 SAST</em>
 
 </div>

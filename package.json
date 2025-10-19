@@ -1,6 +1,6 @@
 {
   "name": "stabilize-orm",
-  "version": "1.3.0",
+  "version": "1.3.2",
   "description": "A lightweight, type-safe ORM for Bun.js with support for SQLite, MySQL, PostgreSQL, and Redis caching",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
