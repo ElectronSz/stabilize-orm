@@ -9,10 +9,12 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
   <a href="#"><img src="https://img.shields.io/badge/PostgreSQL-supported-blue" alt="PostgreSQL"></a>
   <a href="#"><img src="https://img.shields.io/badge/MySQL-supported-blue" alt="MySQL"></a>
   <a href="#"><img src="https://img.shields.io/badge/SQLite-supported-blue" alt="SQLite"></a>
-  <a href="https://github.com/ElectronSz/stabilize-orm/actions"><img src="https://github.com/ElectronSz/stabilize-orm/workflows/CI/badge.svg" alt="Build Status"></a>
+<a href="https://github.com/ElectronSz/stabilize-orm/actions/workflows/ci-cd.yml">
+  <img src="https://github.com/ElectronSz/stabilize-orm/actions/workflows/ci-cd.yml/badge.svg" alt="Build Status">
+</a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
 </p>
----
+
 
 **Stabilize** is a lightweight, feature-rich ORM designed for performance and developer experience. It provides a unified, database-agnostic API for **PostgreSQL**, **MySQL**, and **SQLite**. Powered by a robust query builder, programmatic model definitions, automatic versioning, and a full-featured command-line interface, Stabilize is built to scale with your app.
 
