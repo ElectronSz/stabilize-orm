@@ -42,6 +42,7 @@ export enum DataTypes {
   JSON,      // Maps to JSON, JSONB, or TEXT
   UUID,      // Maps to UUID or VARCHAR(36)
   BLOB,      // Maps to BYTEA or BLOB
+  
 }
 
 export interface DBConfig {

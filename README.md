@@ -25,6 +25,7 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 - **Pluggable Logging**: Includes a robust `ConsoleLogger` with support for file-based, rotating logs.
 - **Custom Errors**: `StabilizeError` provides clear, consistent error handling.
 - **Caching Layer**: Optional Redis-backed caching with `cache-aside` and `write-through` strategies.
+- **Custom Query Scopes**: Define reusable query conditions (scopes) in models for simplified, reusable filtering logic.
 
 ---
 
@@ -358,9 +359,53 @@ console.log(activeAdmins);
   orderBy(clause: string): QueryBuilder<User>;
   limit(limit: number): QueryBuilder<User>;
   offset(offset: number): QueryBuilder<User>;
+  scope(name: string, ...args: any[]): QueryBuilder<User>;
   build(): { query: string; params: any[] };
   execute(client?: DBClient, cache?: Cache, cacheKey?: string): Promise<User[]>;
 }
+```
+
+### Custom Query Scopes
+
+Define reusable query conditions (scopes) in your model configuration to simplify and reuse common filtering logic. Scopes are applied via the `scope` method on `Repository` or `QueryBuilder`, allowing you to chain them with other query operations.
+
+#### **Scopes Example**
+
+```typescript
+import { defineModel, DataTypes } from "stabilize-orm";
+import { orm } from "./db";
+
+const User = defineModel({
+  tableName: "users",
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    email: { type: DataTypes.String, length: 100, required: true },
+    isActive: { type: DataTypes.Boolean, required: true },
+    createdAt: { type: DataTypes.DateTime },
+  },
+  scopes: {
+    active: (qb) => qb.where("isActive = ?", true),
+    recent: (qb, days: number) => qb.where("createdAt >= ?", new Date(Date.now() - days * 24 * 60 * 60 * 1000)),
+  },
+});
+
+const userRepository = orm.getRepository(User);
+
+// Fetch active users
+const activeUsers = await userRepository.scope("active").execute();
+
+// Fetch users created in the last 7 days
+const recentUsers = await userRepository.scope("recent", 7).execute();
+
+// Combine scopes with other query operations
+const recentActiveUsers = await userRepository
+  .scope("active")
+  .scope("recent", 7)
+  .orderBy("createdAt DESC")
+  .limit(10)
+  .execute();
+
+console.log(recentActiveUsers);
 ```
 
 ---
@@ -452,6 +497,6 @@ Licensed under the MIT License. See [LICENSE.md](./LICENSE.md) for details.
 
 Created with ❤️ by **ElectronSz**
 <br/>
-<em>File last updated: 2025-10-18 22:10:00 SAST</em>
+<em>File last updated: 2025-10-19 10:24:00 SAST</em>
 
 </div>

@@ -6,6 +6,8 @@
 
 import { DBClient } from "./client";
 import { Cache } from "./cache";
+import { MetadataStorage } from "./model";
+import { StabilizeError } from "./types";
 
 /**
  * A fluent interface for building SQL SELECT queries.
@@ -125,7 +127,7 @@ export class QueryBuilder<T> {
    */
   build(): { query: string; params: any[] } {
     let query = `SELECT ${this.selectFields.join(", ")} FROM ${this.table}`;
-    
+
     if (this.joins.length > 0) {
       query += " " + this.joins.join(" ");
     }
@@ -166,7 +168,7 @@ export class QueryBuilder<T> {
     cacheKey?: string,
   ): Promise<T[]> {
     const { query, params } = this.build();
-    
+
     // Attempt to retrieve from cache first (cache-aside read)
     if (cache && cacheKey) {
       const cached = await cache.get<T[]>(cacheKey);
@@ -178,9 +180,30 @@ export class QueryBuilder<T> {
 
     // Store the database results in the cache for future requests
     if (cache && cacheKey && results.length > 0) {
-      await cache.set(cacheKey, results, 60); 
+      await cache.set(cacheKey, results, 60);
     }
-    
+
     return results;
   }
+
+  /**
+   * Applies a named scope to the current query builder.
+   *
+   * This method looks up a scope function by name for the current model (based on the table name),
+   * then invokes the scope function with the query builder and any additional arguments.
+   *
+   * @param {string} name - The name of the scope to apply.
+   * @param {...any} args - Additional arguments to pass to the scope function.
+   * @throws {StabilizeError} If no model is found for the current table, or if the specified scope does not exist.
+   * @returns {QueryBuilder<T>} The query builder instance after applying the scope.
+   */
+  scope(name: string, ...args: any[]): QueryBuilder<T> {
+    const model = Object.values(MetadataStorage['models']).find(m => m.tableName === this.table)?.constructor;
+    if (!model) throw new StabilizeError(`Model for table ${this.table} not found`, "SCOPE_ERROR");
+    const scopes = MetadataStorage.getScopes(model);
+    const scopeFn = scopes[name];
+    if (!scopeFn) throw new StabilizeError(`Scope ${name} not found`, "SCOPE_ERROR");
+    return scopeFn(this, ...args);
+  }
+  
 }

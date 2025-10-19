@@ -148,6 +148,21 @@ export class Repository<T> {
     return qb;
   }
 
+    /**
+   * Applies a custom scope to the query for the repository's table.
+   * @param name The name of the scope to apply.
+   * @param args Optional arguments to pass to the scope function.
+   * @returns A `QueryBuilder` instance with the scope applied.
+   * @example
+   * ```
+   * const activeUsers = await userRepository.scope('active').execute(client);
+   * ```
+   */
+  scope(name: string, ...args: any[]): QueryBuilder<T> {
+    this.logger.logDebug(`Applying scope ${name} to ${this.table}`);
+    return this.find().scope(name, ...args);
+  }
+
   /**
    * Finds a single record by its primary key (id).
    * @param id The ID of the record to find.
