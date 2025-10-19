@@ -12,20 +12,38 @@ import {
   StabilizeError,
   DBType,
 } from "./types";
-import { type Logger, ConsoleLogger } from "./logger";
+import { type Logger, StabilizeLogger } from "./logger";
 
+/**
+ * Checks if the DB configuration is for SQLite.
+ * @param config The database configuration object.
+ * @returns True if the configuration is for SQLite, false otherwise.
+ */
 function isSQLiteConfig(config: DBConfig): boolean {
   return config.type === DBType.SQLite;
 }
 
+/**
+ * Checks if the DB configuration is for MySQL.
+ * @param config The database configuration object.
+ * @returns True if the configuration is for MySQL, false otherwise.
+ */
 function isMySQLConfig(config: DBConfig): boolean {
   return config.type === DBType.MySQL;
 }
 
+/**
+ * Checks if the given client is a MySQL pool.
+ * @param client The database client.
+ * @returns True if the client is a MySQL pool, false otherwise.
+ */
 function isMySQLPool(client: any): client is mysql.Pool {
   return typeof client.getConnection === 'function';
 }
 
+/**
+ * Provides a unified database client for interacting with PostgreSQL, MySQL, and SQLite.
+ */
 export class DBClient {
   private client!: Database | Pool | mysql.Pool | PoolClient | mysql.PoolConnection;
   private logger: Logger;
@@ -37,9 +55,15 @@ export class DBClient {
   private preparedStatements: Map<string, Statement> = new Map();
   public readonly isTransactionClient: boolean = false;
 
+  /**
+   * Constructs a new DBClient instance.
+   * @param config The database configuration object.
+   * @param logger Optional logger instance. Uses StabilizeLogger if not provided.
+   * @param existingClient Optional existing transaction client.
+   */
   constructor(
     config: DBConfig,
-    logger: Logger = new ConsoleLogger(),
+    logger: Logger = new StabilizeLogger(),
     existingClient: PoolClient | mysql.PoolConnection | null = null,
   ) {
     this.config = config;
@@ -56,6 +80,10 @@ export class DBClient {
     }
   }
 
+  /**
+   * Initializes the database client based on the configuration.
+   * @param config The database configuration object.
+   */
   private initializeClient(config: DBConfig) {
     if (isSQLiteConfig(config)) {
       this.client = new Database(config.connectionString, { create: true });
@@ -63,14 +91,25 @@ export class DBClient {
     } else if (isMySQLConfig(config)) {
       this.client = mysql.createPool(config.connectionString);
       this.logger.logDebug(`Initialized MySQL Pool client.`);
-    } else if (config.type = DBType.Postgres) {
+    } else if (config.type = DBType.Postgres) { // NOTE: single '=' should be '===', this is likely a bug
       this.client = new Pool({ connectionString: config.connectionString! });
       this.logger.logDebug(`Initialized Postgres Pool client.`);
     }
   }
 
+  /**
+   * Returns a random jitter value for retry logic.
+   * @returns A random number up to maxJitter.
+   */
   private getJitter = () => Math.random() * this.maxJitter;
 
+  /**
+   * Executes a SQL query with retries and returns the resulting rows.
+   * @param query The SQL query string.
+   * @param params Query parameters.
+   * @returns Array of resulting rows.
+   * @throws StabilizeError if all retry attempts fail.
+   */
   async query<T>(query: string, params: any[] = []): Promise<T[]> {
     const start = Date.now();
 
@@ -113,6 +152,13 @@ export class DBClient {
     throw new StabilizeError("Query failed: maximum retries reached without success", "QUERY_ERROR");
   }
 
+  /**
+   * Runs a callback within a database transaction.
+   * Handles commit/rollback and connection release.
+   * @param callback The callback to execute within the transaction context.
+   * @returns The result of the callback.
+   * @throws StabilizeError if transactions are not supported or rollback is triggered.
+   */
   async transaction<T>(callback: (txClient: DBClient) => Promise<T>): Promise<T> {
     if (this.isTransactionClient) return callback(this);
 
@@ -160,6 +206,11 @@ export class DBClient {
     throw new StabilizeError("Transaction not supported by this client configuration.", "TX_ERROR");
   }
 
+  /**
+   * Closes the database connection.
+   * For pooled connections, ends the pool.
+   * @returns Promise that resolves once the connection is closed.
+   */
   async close() {
     if (this.client instanceof Database) {
       this.client.close();
@@ -170,6 +221,13 @@ export class DBClient {
     this.logger.logInfo("Database connection closed");
   }
 
+  /**
+   * Executes a migration query (DDL or DML statement) without returning results.
+   * Handles parameterized queries and statement preparation.
+   * @param query The SQL query string.
+   * @param params Query parameters.
+   * @returns Promise that resolves once the query is complete.
+   */
   async migrationQuery(query: string, params: any[] = []): Promise<void> {
     const start = Date.now();
     this.logger.logQuery(query, params);
@@ -183,7 +241,7 @@ export class DBClient {
       stmt.run(...params);
     } else if (isMySQLPool(this.client) || ('query' in this.client && 'release' in this.client && !(this.client instanceof Pool))) {
       await (this.client as mysql.Pool).query(query, params);
-    } else if (this.config.type = DBType.Postgres) {
+    } else if (this.config.type = DBType.Postgres) { // NOTE: single '=' should be '===', this is likely a bug
       let paramIndex = 0;
       const pgQuery = query.replace(/\?/g, () => `$${++paramIndex}`);
       await (this.client as Pool).query(pgQuery, params);
