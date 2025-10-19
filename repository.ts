@@ -46,6 +46,7 @@ export class Repository<T> {
   private logger: Logger;
   private versioned: boolean;
   private historyTable: string;
+  private model: new (...args: any[]) => T;
 
   /**
    * Creates an instance of Repository.
@@ -87,6 +88,7 @@ export class Repository<T> {
     this.logger = logger;
     this.versioned = MetadataStorage.isVersioned(model);
     this.historyTable = `${this.table}_history`;
+    this.model = model;
   }
 
   /**
@@ -287,15 +289,34 @@ export class Repository<T> {
       "modified_at"
     ];
 
-    const values = propertyKeys.map((k) => entity[k]);
+    // Helper to sanitize each value before inserting into SQLite/Postgres/MySQL
+    function sanitizeSqlValue(val: any, dbType: DBType): string | number | boolean | bigint | null {
+      if (val === undefined) return null;
+      if (val instanceof Date) {
+        if (dbType === DBType.MySQL) {
+          // MySQL DATETIME: 'YYYY-MM-DD HH:MM:SS'
+          return val.toISOString().slice(0, 19).replace('T', ' ');
+        }
+        return val.toISOString();
+      }
+      if (typeof val === "boolean") return val ? 1 : 0;
+      if (
+        typeof val === "string" ||
+        typeof val === "number" ||
+        typeof val === "bigint"
+      ) return val;
+      return null;
+    }
+    const dbType = client.config.type;
+    const values = propertyKeys.map((k) => sanitizeSqlValue(entity[k], dbType));
     const params = [
       ...values,
-      operation,
-      entity.version || 1,
-      new Date(),
-      null,
-      user || "system",
-      new Date()
+      sanitizeSqlValue(operation, dbType),
+      sanitizeSqlValue(entity.version || 1, dbType),
+      sanitizeSqlValue(new Date(), dbType),
+      sanitizeSqlValue(null, dbType),
+      sanitizeSqlValue(user || "system", dbType),
+      sanitizeSqlValue(new Date(), dbType)
     ];
 
     let placeholders: string;

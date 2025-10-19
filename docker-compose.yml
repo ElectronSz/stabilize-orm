@@ -1,0 +1,22 @@
+
+services:
+  db:
+    image: mariadb:latest
+    container_name: mariadb-container
+    restart: always
+    environment:
+      # Required: set a secure root password
+      MARIADB_ROOT_PASSWORD: P@ssw0rd
+      # Optional: set up a default database and user
+      MARIADB_DATABASE: db
+      MARIADB_USER: admin
+      MARIADB_PASSWORD: P@ssw0rd
+    ports:
+      # Map host port 3306 to container port 3306
+      - '3306:3306'
+    volumes:
+      # Create a named volume for persistent data storage
+      - mariadb_data:/var/lib/mysql
+
+volumes:
+  mariadb_data:

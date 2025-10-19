@@ -117,8 +117,6 @@ export class DBClient {
       try {
         let result: any;
 
-        this.logger.logQuery(query, params);
-
         if (this.client instanceof Database) {
           let stmt = this.preparedStatements.get(query);
           if (!stmt) {
@@ -126,7 +124,7 @@ export class DBClient {
             this.preparedStatements.set(query, stmt);
           }
           result = stmt.all(...params);
-        } else if (this.config.type === DBType.MySQL && isMySQLPool(this.client)) {
+        } else if (this.config.type === DBType.MySQL) {
           const [rows] = await (this.client as mysql.Pool).query(query, params);
           result = rows;
         } else if (this.config.type === DBType.Postgres ) {
@@ -230,8 +228,6 @@ export class DBClient {
    */
   async migrationQuery(query: string, params: any[] = []): Promise<void> {
     const start = Date.now();
-    this.logger.logQuery(query, params);
-
     if (this.client instanceof Database) {
       let stmt = this.preparedStatements.get(query);
       if (!stmt) {

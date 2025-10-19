@@ -6,7 +6,7 @@
 
 import Redis from "ioredis";
 import { type CacheConfig, type CacheStats } from "./types";
-import { ConsoleLogger, type Logger } from "./logger";
+import { StabilizeLogger, type Logger } from "./logger";
 
 /**
  * A caching client that uses Redis to store and retrieve query results.
@@ -26,7 +26,7 @@ export class Cache {
    * @param config The configuration for the cache, including Redis URL and TTL.
    * @param logger A logger instance for logging messages.
    */
-  constructor(config: CacheConfig, logger: Logger = new ConsoleLogger()) {
+  constructor(config: CacheConfig, logger: Logger = new StabilizeLogger()) {
     this.config = config;
     this.logger = logger;
 

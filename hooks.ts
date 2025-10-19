@@ -26,7 +26,7 @@ export interface Hook {
 // Extend ModelConfig to include hooks
 declare module "./model" {
   interface ModelConfig {
-    hooks?: Record<HookType, HookCallback | HookCallback[]>;
+    hooks?:  Partial<Record<HookType, HookCallback | HookCallback[]>>;
   }
 }
 

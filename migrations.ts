@@ -133,6 +133,7 @@ export async function generateMigration(
   const columns = MetadataStorage.getColumns(model);
   const validators = MetadataStorage.getValidators(model);
   const versioned = MetadataStorage.isVersioned(model);
+  const timestamps = MetadataStorage.getTimestamps(model);
 
   const columnDefs: string[] = [];
 
@@ -161,6 +162,28 @@ export async function generateMigration(
     }
 
     columnDefs.push(defParts.join(" "));
+  }
+
+  // Add timestamp columns if enabled
+  if (timestamps) {
+    for (const [field, colName] of Object.entries(timestamps)) {
+      // Use the field name defined in the timestamps config
+      let sqlType = dbType === DBType.Postgres ? "TIMESTAMP" : "DATETIME";
+      let def = `${colName} ${sqlType} NOT NULL`;
+
+      // Set default value for createdAt, and optionally for updatedAt
+      if (field === "createdAt") {
+        def += " DEFAULT CURRENT_TIMESTAMP";
+      } else if (field === "updatedAt") {
+        def += " DEFAULT CURRENT_TIMESTAMP";
+        // For MySQL, add ON UPDATE CURRENT_TIMESTAMP
+        if (dbType === DBType.MySQL) {
+          def += " ON UPDATE CURRENT_TIMESTAMP";
+        }
+      }
+
+      columnDefs.push(def);
+    }
   }
 
   const up: string[] = [`CREATE TABLE IF NOT EXISTS ${tableName} (${columnDefs.join(", ")})`];
@@ -194,8 +217,15 @@ function generateHistoryMigration(
   let modByType = dbType === DBType.MySQL ? "VARCHAR(255)" : "TEXT";
   let modAtType = tsType + (dbType === DBType.Postgres ? " DEFAULT CURRENT_TIMESTAMP" : "");
 
+  // Strip constraints for history columns
+  function cleanColumnDef(def: string): string {
+    return def
+      .replace(/\s+PRIMARY\s+KEY\b/gi, "")
+      .replace(/\s+UNIQUE\b/gi, "");
+  }
+
   const historyColumns = [
-    ...columnDefs,
+    ...columnDefs.map(cleanColumnDef),
     `operation ${opType}`,
     `version ${versionType}`,
     `valid_from ${tsType} NOT NULL`,
@@ -264,7 +294,13 @@ export async function runMigrations(config: DBConfig, migrations: Migration[]) {
           }
 
           const insertQuery = formatQuery(`INSERT INTO stabilize_migrations (name, applied_at) VALUES (?, ?)`, dbType);
-          await txClient.query(insertQuery, [name, new Date().toISOString()]);
+          let appliedAt: string;
+          if (dbType === DBType.MySQL) {
+            appliedAt = new Date().toISOString().slice(0, 19).replace("T", " ");
+          } else {
+            appliedAt = new Date().toISOString();
+          }
+          await txClient.query(insertQuery, [name, appliedAt]);
 
           console.log(`Migration ${name} applied successfully.`);
         });
@@ -279,3 +315,4 @@ export async function runMigrations(config: DBConfig, migrations: Migration[]) {
 }
 
 export type { Migration };
+export { mapDataTypeToSql };

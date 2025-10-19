@@ -5,10 +5,10 @@
  */
 import { Cache } from "./cache";
 import { DBClient } from "./client";
-import { type Logger, ConsoleLogger } from "./logger";
+import { type Logger, StabilizeLogger } from "./logger";
 import { QueryBuilder } from "./query-builder";
 import { Repository } from "./repository";
-import { runMigrations, generateMigration, type Migration } from "./migrations";
+import { runMigrations, generateMigration, type Migration, mapDataTypeToSql} from "./migrations";
 import {
   type DBConfig,
   type CacheConfig,
@@ -22,7 +22,7 @@ import {
   type CacheStats,
   LogLevel,
 } from "./types";
-import { defineModel } from "./model";
+import { defineModel, MetadataStorage } from "./model";
 import type { Hook } from "./hooks";
 
 export class Stabilize {
@@ -42,7 +42,7 @@ export class Stabilize {
     loggerConfig: LoggerConfig = {},
     existingClient?: DBClient,
   ) {
-    this.logger = new ConsoleLogger(loggerConfig);
+    this.logger = new StabilizeLogger(loggerConfig);
     this.client = existingClient || new DBClient(config, this.logger);
     this.cache = existingClient ? null : (cacheConfig.enabled
       ? new Cache(cacheConfig, this.logger)
@@ -131,15 +131,18 @@ export {
   DBClient,
   QueryBuilder,
   Cache,
-  ConsoleLogger,
+  StabilizeLogger,
   DBType,
   DataTypes,
   LogLevel,
   RelationType,
+  MetadataStorage,
+  mapDataTypeToSql,
   StabilizeError,
   runMigrations,
   generateMigration,
   defineModel,
+  
 };
 
 export type {
