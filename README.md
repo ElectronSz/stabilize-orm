@@ -1,7 +1,9 @@
 # Stabilize ORM
 
 _A Modern, Type-Safe, and Expressive ORM for Bun_
-
+<p align="left">
+  <img src="./public/logo_both-transparent.png" alt="Stabilize ORM Logo" width="240" />
+</p>
 <p align="left">
   <a href="https://www.npmjs.com/package/stabilize-orm"><img src="https://img.shields.io/npm/v/stabilize-orm.svg?label=version&color=blue" alt="NPM Version"></a>
   <a href="https://github.com/ElectronSz/stabilize-cli/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/stabilize-orm.svg?color=green" alt="License"></a>
