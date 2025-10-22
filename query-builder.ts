@@ -24,6 +24,10 @@ export class QueryBuilder<T> {
   private orderByClause: string | null = null;
   private limitValue: number | null = null;
   private offsetValue: number | null = null;
+  private pagination?: { page: number; pageSize: number };
+  private includeTrashed = false;
+  private onlyTrashed = false;
+
 
   /**
    * Creates an instance of QueryBuilder.
@@ -205,5 +209,12 @@ export class QueryBuilder<T> {
     if (!scopeFn) throw new StabilizeError(`Scope ${name} not found`, "SCOPE_ERROR");
     return scopeFn(this, ...args);
   }
-  
+
+  paginate(page: number, pageSize: number): QueryBuilder<T> {
+    this.pagination = { page, pageSize };
+    this.limitValue = pageSize;
+    this.offsetValue = (page - 1) * pageSize;
+    return this;
+  }
+
 }

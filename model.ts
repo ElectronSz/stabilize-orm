@@ -18,7 +18,12 @@ export interface ColumnConfig {
     unique?: boolean;
     defaultValue?: any;
     index?: string; // Optional index name
-    softDelete?: boolean; // Marks column as soft delete field
+    softDelete?: boolean;
+    minLength?: number;
+    maxLength?: number;
+    pattern?: RegExp;
+    customValidator?: (val: any) => boolean | string;
+
 }
 
 // Interface for relationship configuration

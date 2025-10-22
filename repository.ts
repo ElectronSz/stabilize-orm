@@ -1093,4 +1093,16 @@ export class Repository<T> {
         );
     }
   }
+
+
+  async paginate(page: number, pageSize: number, options: any = {}): Promise<{ data: T[], total: number, page: number, pageSize: number }> {
+    
+    const qb = this.find();
+    const data = await qb.paginate(page, pageSize).execute(this.client);
+    const result = await this.client.query<{ count: number }>(`SELECT COUNT(*) as count FROM ${this.table}`);
+    const count = result?.[0]?.count ?? 0;
+
+    return { data, total: Number(count), page, pageSize };
+  }
+  
 }
