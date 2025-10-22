@@ -30,7 +30,14 @@ export class Repository<T> {
   private client: DBClient;
   private cache: Cache | null;
   private table: string;
-  private columns: Record<string, { name: string; type: string }>;
+  private columns: Record<string, {
+    name: string;
+    type: string;
+    minLength?: number;
+    maxLength?: number;
+    pattern?: RegExp;
+    customValidator?: (val: any) => boolean | string;
+  }>;
   private validators: Record<string, string[]>;
   private relations: Record<
     string,
@@ -103,24 +110,63 @@ export class Repository<T> {
   }
 
   /**
-   * @internal
-   * Validates an entity against the 'required' constraints defined in the model configuration.
-   * @param entity The partial entity to validate.
-   */
+  * Validates an entity's fields based on predefined validator rules and column constraints.
+  *
+  * @template T - The entity type being validated.
+  * @param {Partial<T>} entity - The entity object to validate (can be partial during updates).
+  * @throws {StabilizeError} If any validation rule fails, throws an error with type `"VALIDATION_ERROR"`.
+  *
+  * @description
+  * This method performs multiple levels of validation on entity fields:
+  * If it returns a string, that string is used as the validation error message.
+  *
+  * @example
+  * // Example column definition:
+  * this.columns = {
+  *   username: { minLength: 3, maxLength: 20, pattern: /^[a-z0-9_]+$/i },
+  *   email: { pattern: /^[^@]+@[^@]+\.[^@]+$/ },
+  *   age: { customValidator: (v) => (v >= 18 ? true : "Must be 18 or older") }
+  * };
+  */
   private validate(entity: Partial<T>) {
     for (const [key, rules] of Object.entries(this.validators)) {
       const value = (entity as any)[key];
-      if (
-        rules.includes("required") &&
-        (value === undefined || value === null)
-      ) {
-        throw new StabilizeError(
-          `Field ${key} is required`,
-          "VALIDATION_ERROR",
-        );
+
+      // 🔹 Required validation
+      if (rules.includes("required") && (value === undefined || value === null)) {
+        throw new StabilizeError(`Field ${key} is required`, "VALIDATION_ERROR");
+      }
+
+      // 🔹 Skip further checks if field is empty and not required
+      if (value === undefined || value === null) continue;
+
+      const column = this.columns?.[key];
+      if (!column) continue;
+
+      // 🔹 Length validation
+      if (column.minLength && typeof value === "string" && value.length < column.minLength) {
+        throw new StabilizeError(`Field ${key} too short`, "VALIDATION_ERROR");
+      }
+
+      if (column.maxLength && typeof value === "string" && value.length > column.maxLength) {
+        throw new StabilizeError(`Field ${key} too long`, "VALIDATION_ERROR");
+      }
+
+      // 🔹 Pattern validation
+      if (column.pattern && typeof value === "string" && !column.pattern.test(value)) {
+        throw new StabilizeError(`Field ${key} does not match pattern`, "VALIDATION_ERROR");
+      }
+
+      // 🔹 Custom validator
+      if (typeof column.customValidator === "function") {
+        const result = column.customValidator(value);
+        if (result !== true) {
+          throw new StabilizeError(result as string, "VALIDATION_ERROR");
+        }
       }
     }
   }
+
 
   /**
    * Runs lifecycle hooks of a given type for the entity.
