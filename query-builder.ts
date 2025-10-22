@@ -210,11 +210,25 @@ export class QueryBuilder<T> {
     return scopeFn(this, ...args);
   }
 
+  /**
+   * Applies pagination to the query by setting LIMIT and OFFSET values.
+   *
+   * @param {number} page - The current page number (starting from 1).
+   * @param {number} pageSize - The number of records per page.
+   * @returns {QueryBuilder<T>} The current QueryBuilder instance for chaining.
+   *
+   * @example
+   * const results = await query
+   *   .where({ status: 'active' })
+   *   .paginate(3, 25)
+   *   .execute(client);
+   */
   paginate(page: number, pageSize: number): QueryBuilder<T> {
     this.pagination = { page, pageSize };
     this.limitValue = pageSize;
     this.offsetValue = (page - 1) * pageSize;
     return this;
   }
+
 
 }

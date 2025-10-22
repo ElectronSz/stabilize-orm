@@ -1095,14 +1095,37 @@ export class Repository<T> {
   }
 
 
-  async paginate(page: number, pageSize: number, options: any = {}): Promise<{ data: T[], total: number, page: number, pageSize: number }> {
-    
+  /**
+   * Retrieves paginated data and total record count from the database.
+   *
+   * @template T - The entity type returned by the query.
+   * @param {number} page - The current page number (starting from 1).
+   * @param {number} pageSize - The number of records per page.
+   * @param {any} [options={}] - Optional query options or filters.
+   * @returns {Promise<{ data: T[]; total: number; page: number; pageSize: number }>} 
+   * An object containing:
+   *  - `data`: Array of paginated records.
+   *  - `total`: Total number of records in the table.
+   *  - `page`: Current page number.
+   *  - `pageSize`: Number of items per page.
+   *
+   * @example
+   * const { data, total, page, pageSize } = await userRepository.paginate(2, 10);
+   * console.log(`Fetched ${data.length} records out of ${total} total.`);
+   */
+  async paginate(
+    page: number,
+    pageSize: number,
+    options: any = {}
+  ): Promise<{ data: T[]; total: number; page: number; pageSize: number }> {
     const qb = this.find();
     const data = await qb.paginate(page, pageSize).execute(this.client);
-    const result = await this.client.query<{ count: number }>(`SELECT COUNT(*) as count FROM ${this.table}`);
+    const result = await this.client.query<{ count: number }>(
+      `SELECT COUNT(*) as count FROM ${this.table}`
+    );
     const count = result?.[0]?.count ?? 0;
-
     return { data, total: Number(count), page, pageSize };
   }
-  
+
+
 }
