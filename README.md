@@ -34,6 +34,8 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 - **Connection Pooling**: Efficient connection management for PostgreSQL and MySQL.
 - **Transactional Integrity**: Built-in support for atomic transactions with automatic rollback on failure.
 - **Advanced Query Builder**: Fluent, chainable API for building complex queries, including joins, filters, ordering, and pagination.
+- **Pagination Helper**: Easily paginate any query with `.paginate(page, pageSize)` and get `{ data, total, page, pageSize }`.
+- **Advanced Model Validation**: Enforce rules like `required`, `minLength`, `maxLength`, `pattern`, and custom validators—errors are thrown on invalid input.
 - **Model Relationships**: Define `OneToOne`, `ManyToOne`, `OneToMany`, and `ManyToMany` relationships in the model configuration.
 - **Soft Deletes**: Enable soft deletes in the model configuration for transparent "deleted" flags and safe row removal.
 - **Lifecycle Hooks**: Define hooks in the model configuration or as class methods for lifecycle events like `beforeCreate`, `afterUpdate`, etc.
@@ -145,59 +147,55 @@ const User = defineModel({
   },
 });
 
-// Add a hook as a class method
-User.prototype.afterCreate = async function () {
-  console.log(`Created user with ID: ${this.id}`);
-};
-
 export { User };
 ```
 
+---
+
+## 🔍 Pagination
+
+The built-in pagination helper makes it easy to retrieve paged results and total counts in a single call.
+
 ```typescript
-// models/Role.ts
-import { defineModel, DataTypes } from "stabilize-orm";
-
-const Role = defineModel({
-  tableName: "roles",
-  columns: {
-    id: { type: DataTypes.Integer, required: true },
-    name: { type: DataTypes.String, length: 50, required: true, unique: true },
-  },
-});
-
-export { Role };
+const page = await userRepository.paginate(2, 10);
+// page = { data: [...], total: N, page: 2, pageSize: 10 }
 ```
 
-```typescript
-// models/UserRole.ts
-import { defineModel, DataTypes, RelationType } from "stabilize-orm";
-import { User } from "./User";
-import { Role } from "./Role";
+Or, use the query builder:
 
-const UserRole = defineModel({
-  tableName: "user_roles",
+```typescript
+const page = await userRepository.find().where('isActive = ?', true).paginate(1, 20).execute();
+```
+
+---
+
+## 🛡️ Advanced Validation
+
+Models can define advanced validation rules for columns, including:
+
+- `required`
+- `minLength` / `maxLength`
+- `pattern` (RegExp)
+- `customValidator` (function)
+
+Validation errors are thrown on create/update if data is invalid.
+
+```typescript
+const User = defineModel({
+  tableName: "users",
   columns: {
     id: { type: DataTypes.Integer, required: true },
-    userId: { type: DataTypes.Integer, required: true, index: "idx_user_id" },
-    roleId: { type: DataTypes.Integer, required: true, index: "idx_role_id" },
+    email: {
+      type: DataTypes.String,
+      required: true,
+      unique: true,
+      minLength: 6,
+      pattern: /^[^@]+@[^@]+\.[^@]+$/,
+      customValidator: (val) => val.endsWith("@offbytesecure.com") || "Must use an @offbytesecure.com email"
+    },
+    password: { type: DataTypes.String, minLength: 8 },
   },
-  relations: [
-    {
-      type: RelationType.ManyToOne,
-      target: () => User,
-      property: "user",
-      foreignKey: "userId",
-    },
-    {
-      type: RelationType.ManyToOne,
-      target: () => Role,
-      property: "role",
-      foreignKey: "roleId",
-    },
-  ],
 });
-
-export { UserRole };
 ```
 
 ---

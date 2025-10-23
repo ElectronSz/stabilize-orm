@@ -23,6 +23,7 @@ export interface ColumnConfig {
     maxLength?: number;
     pattern?: RegExp;
     customValidator?: (val: any) => boolean | string;
+    encrypted?: boolean;
 
 }
 

@@ -17,6 +17,7 @@ import {
 } from "./types";
 import { MetadataStorage } from "./model";
 import { getHooks, type HookType } from "./hooks";
+import { decrypt, encrypt } from "./utils/encryption";
 
 type VersionOperation = "insert" | "update" | "delete";
 
@@ -132,18 +133,18 @@ export class Repository<T> {
     for (const [key, rules] of Object.entries(this.validators)) {
       const value = (entity as any)[key];
 
-      // 🔹 Required validation
+      //  Required validation
       if (rules.includes("required") && (value === undefined || value === null)) {
         throw new StabilizeError(`Field ${key} is required`, "VALIDATION_ERROR");
       }
 
-      // 🔹 Skip further checks if field is empty and not required
+      // Skip further checks if field is empty and not required
       if (value === undefined || value === null) continue;
 
       const column = this.columns?.[key];
       if (!column) continue;
 
-      // 🔹 Length validation
+      //  Length validation
       if (column.minLength && typeof value === "string" && value.length < column.minLength) {
         throw new StabilizeError(`Field ${key} too short`, "VALIDATION_ERROR");
       }
@@ -152,12 +153,12 @@ export class Repository<T> {
         throw new StabilizeError(`Field ${key} too long`, "VALIDATION_ERROR");
       }
 
-      // 🔹 Pattern validation
+      // Pattern validation
       if (column.pattern && typeof value === "string" && !column.pattern.test(value)) {
         throw new StabilizeError(`Field ${key} does not match pattern`, "VALIDATION_ERROR");
       }
 
-      // 🔹 Custom validator
+      // Custom validator
       if (typeof column.customValidator === "function") {
         const result = column.customValidator(value);
         if (result !== true) {
@@ -238,10 +239,11 @@ export class Repository<T> {
     }
     const cacheKey = `findOne:${this.table}:${id}:${options.relations?.join(",")}`;
     const results = await queryBuilder.execute(client, this.cache!, cacheKey);
+    const result = this.processForLoad(results);
     this.logger.logDebug(
       `Found ${this.table} with ID ${id} in ${(performance.now() - start).toFixed(2)}ms`,
     );
-    return results[0] || null;
+    return result[0] || null;
   }
 
   /**
@@ -423,9 +425,10 @@ export class Repository<T> {
       `Creating ${this.table} with data: ${JSON.stringify(entity)}`,
     );
     this.validate(entity);
+    const entityToSave = this.processForSave(entity);
 
     const timestamps = MetadataStorage.getTimestamps((this as any).model || Object);
-    const entityWithTimestamps = { ...entity } as Record<string, any>;
+    const entityWithTimestamps = { ...entityToSave } as Record<string, any>;
     if (timestamps.createdAt && !entityWithTimestamps[timestamps.createdAt]) {
       entityWithTimestamps[timestamps.createdAt] = new Date();
     }
@@ -443,6 +446,7 @@ export class Repository<T> {
     let id: number | string | undefined;
     const dbType = this.getDBType(client);
 
+    
     if (dbType === DBType.Postgres) {
       query += " RETURNING *";
       insertedResult = await client.query<T>(query, params);
@@ -1173,5 +1177,32 @@ export class Repository<T> {
     return { data, total: Number(count), page, pageSize };
   }
 
+
+  // Encrypt fields before save
+  private processForSave(entity: any): any {
+    const processed = { ...entity };
+    for (const [key, col] of Object.entries(this.columns)) {
+      if ((col as any).encrypted && processed[key]) {
+        processed[key] = encrypt(processed[key]);
+      }
+    }
+    return processed;
+  }
+
+  // Decrypt fields after load
+  private processForLoad(row: any): any {
+    const processed = { ...row };
+    for (const [key, col] of Object.entries(this.columns)) {
+      if ((col as any).encrypted && processed[key]) {
+        try {
+          processed[key] = decrypt(processed[key]);
+        } catch {
+          // Optionally, log or throw for corrupted/corrupt data
+          processed[key] = null;
+        }
+      }
+    }
+    return processed;
+  }
 
 }
