@@ -75,7 +75,14 @@ export class Repository<T> {
     this.columns = Object.fromEntries(
       Object.entries(MetadataStorage.getColumns(model)).map(([key, col]) => [
         key,
-        { name: col.name ?? key, type: typeof col.type === 'string' ? col.type : DataTypes[col.type] },
+        {
+          name: col.name ?? key,
+          type: typeof col.type === 'string' ? col.type : DataTypes[col.type],
+          minLength: col.minLength,
+          maxLength: col.maxLength,
+          pattern: col.pattern,
+          customValidator: col.customValidator,
+        },
       ])
     );
     this.relations = Object.fromEntries(

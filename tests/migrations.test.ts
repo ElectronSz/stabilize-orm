@@ -1,141 +1,117 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { defineModel } from '../model';
 import { generateMigration, runMigrations } from '../migrations';
-import { DBType } from '../types';
-// We must mock the imports that provide the metadata keys and the client implementation
-import { ModelKey, ColumnKey, ValidatorKey, SoftDeleteKey } from '../decorators';
-import { DBClient } from '../client'; 
+import { DataTypes, DBType } from '../types';
+import { DBClient } from '../client';
 
-// --- MOCKING SETUP ---
+vi.mock('../client', () => {
+  const query = vi.fn(async (sql: string, _params: any[] = []) => {
+    if (sql.includes('SELECT id FROM stabilize_migrations')) {
+      return [];
+    }
+    return [];
+  });
 
-// Mocking Reflect.getMetadata behavior to simulate data set by the @Model, @Column, etc. decorators
-const mockMetadata = new Map();
+  const close = vi.fn(async () => {});
 
-// Helper to set mock data for tests
-const setMockMetadata = (tableName: string, columns: any, validators: any, softDeleteField?: string) => {
-  mockMetadata.set(ModelKey, tableName);
-  mockMetadata.set(ColumnKey, columns);
-  mockMetadata.set(ValidatorKey, validators);
-  if (softDeleteField) {
-    mockMetadata.set(SoftDeleteKey, softDeleteField);
-  } else {
-    mockMetadata.delete(SoftDeleteKey);
-  }
-};
+  const transaction = vi.fn(async (callback: (txClient: { query: typeof query }) => Promise<void>) => {
+    await callback({ query });
+  });
 
-// Spy on the global Reflect.getMetadata used by the functions to return our mock data
-const getMetadataSpy = vi.spyOn(Reflect, 'getMetadata');
-getMetadataSpy.mockImplementation((key, target) => mockMetadata.get(key));
-
-
-// Mock Model Placeholder
-class MockModel {} 
-
-// Mock DBClient for runMigrations test: this prevents hitting a real database
-vi.mock('./client', () => {
-    const mockQuery = vi.fn(async (query: string) => {
-        // Simulate no existing migration found when selecting from 'migrations'
-        if (query.includes('SELECT id FROM migrations')) {
-            return [];
-        }
-        return [];
-    });
-    return {
-        DBClient: vi.fn(() => ({
-            query: mockQuery,
-            close: vi.fn(async () => {}),
-            // Provide a mock config for runMigrations to safely access DBType
-            config: {
-                type: DBType.SQLite 
-            }
-        }))
-    };
+  return {
+    DBClient: vi.fn(() => ({
+      query,
+      close,
+      transaction,
+      config: { type: DBType.SQLite },
+    })),
+  };
 });
 
-// --- TESTS START HERE ---
-
 describe('generateMigration', () => {
-  const commonColumns = {
-    id: { name: 'id', type: 'INTEGER' },
-    username: { name: 'user_name', type: 'TEXT' },
-    createdAt: { name: 'created_at', type: 'TEXT' }
-  };
-  const commonValidators = {
-    username: ['required', 'unique']
-  };
-
   it('should generate SQLite-specific primary key (AUTOINCREMENT)', async () => {
-    setMockMetadata('users', commonColumns, commonValidators);
+    const User = defineModel({
+      tableName: 'users',
+      columns: {
+        id: { name: 'id', type: DataTypes.INTEGER },
+        username: { name: 'user_name', type: DataTypes.STRING, required: true, unique: true },
+      },
+    });
 
-    const migration = await generateMigration(MockModel, DBType.SQLite);
+    const migration = await generateMigration(User, 'create_users', DBType.SQLite);
 
     expect(migration.up[0]).toBe(
-      'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name TEXT NOT NULL UNIQUE, created_at TEXT)'
+      'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name TEXT NOT NULL UNIQUE)'
     );
+    expect(migration.name).toBe('create_users');
   });
 
   it('should generate PostgreSQL-specific primary key (SERIAL)', async () => {
-    setMockMetadata('products', commonColumns, commonValidators);
+    const Product = defineModel({
+      tableName: 'products',
+      columns: {
+        id: { name: 'id', type: DataTypes.INTEGER },
+        title: { name: 'title', type: DataTypes.STRING },
+      },
+    });
 
-    const migration = await generateMigration(MockModel, DBType.Postgres);
+    const migration = await generateMigration(Product, 'create_products', DBType.Postgres);
 
     expect(migration.up[0]).toBe(
-      'CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, user_name TEXT NOT NULL UNIQUE, created_at TEXT)'
+      'CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, title TEXT)'
     );
   });
 
-  it('should generate MySQL-specific primary key (AUTO_INCREMENT)', async () => {
-    setMockMetadata('posts', commonColumns, commonValidators);
+  it('should include history table for versioned models', async () => {
+    const Order = defineModel({
+      tableName: 'orders',
+      versioned: true,
+      columns: {
+        id: { name: 'id', type: DataTypes.INTEGER },
+        amount: { name: 'amount', type: DataTypes.DECIMAL },
+      },
+    });
 
-    const migration = await generateMigration(MockModel, DBType.MySQL);
+    const migration = await generateMigration(Order, 'create_orders', DBType.SQLite);
 
-    expect(migration.up[0]).toBe(
-      'CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTO_INCREMENT, user_name TEXT NOT NULL UNIQUE, created_at TEXT)'
+    expect(migration.up).toHaveLength(2);
+    expect(migration.up[1]).toContain('CREATE TABLE IF NOT EXISTS orders_history');
+  });
+
+  it('should throw an error if model tableName is missing', async () => {
+    class UndecoratedModel {}
+
+    await expect(generateMigration(UndecoratedModel, 'invalid', DBType.SQLite)).rejects.toThrow(
+      'Model not defined with tableName'
     );
-  });
-
-  it('should include soft delete field if present on the model', async () => {
-    const softDeleteColumns = {
-      ...commonColumns,
-      deletedAt: { name: 'deleted_at', type: 'TEXT' }
-    };
-    setMockMetadata('orders', softDeleteColumns, commonValidators, 'deletedAt');
-
-    const migration = await generateMigration(MockModel, DBType.SQLite);
-
-    expect(migration.up[0]).toContain(', deleted_at TEXT)');
-  });
-
-  it('should throw an error if the model is missing the @Model decorator', async () => {
-    mockMetadata.delete(ModelKey);
-    await expect(generateMigration(MockModel, DBType.SQLite)).rejects.toThrow('Model not decorated with @Model');
   });
 });
 
 describe('runMigrations', () => {
-    it('should create the migrations table and run the UP script for new migrations', async () => {
-        const mockMigrations = [
-            { up: ['CREATE TABLE test_table (id INT)'], down: ['DROP TABLE test_table'] }
-        ];
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
-        // Run migrations using the mocked DBClient (defaulted to SQLite type)
-        await runMigrations({ type: DBType.SQLite,connectionString:"" }, mockMigrations);
+  it('should create stabilize_migrations table and run UP scripts for new migrations', async () => {
+    const migrations = [
+      { name: 'create_test_table', up: ['CREATE TABLE test_table (id INT)'], down: ['DROP TABLE test_table'] },
+    ];
 
-        // Access the mock instance
-        const mockClient = (DBClient as any).mock.results[0].value;
-        
-        // 1. Verify CREATE TABLE IF NOT EXISTS migrations was called
-        expect(mockClient.query).toHaveBeenCalledWith(expect.stringContaining('CREATE TABLE IF NOT EXISTS migrations ('));
-        
-        // 2. Verify the actual UP query was executed
-        expect(mockClient.query).toHaveBeenCalledWith('CREATE TABLE test_table (id INT)', []);
+    await runMigrations({ type: DBType.SQLite, connectionString: '' }, migrations);
 
-        // 3. Verify the migration log record was inserted
-        expect(mockClient.query).toHaveBeenCalledWith(
-            expect.stringContaining('INSERT INTO migrations (name, applied_at) VALUES (?, ?)'),
-            expect.arrayContaining([expect.stringContaining('migration_0_'), expect.any(String)])
-        );
+    const mockClient = (DBClient as any).mock.results[0].value;
 
-        // 4. Verify the client was closed in the finally block
-        expect(mockClient.close).toHaveBeenCalled();
-    });
+    expect(mockClient.query).toHaveBeenCalledWith(expect.stringContaining('CREATE TABLE IF NOT EXISTS stabilize_migrations'));
+    expect(mockClient.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT id FROM stabilize_migrations WHERE name = ?'),
+      ['create_test_table']
+    );
+    expect(mockClient.transaction).toHaveBeenCalled();
+    expect(mockClient.query).toHaveBeenCalledWith('CREATE TABLE test_table (id INT)');
+    expect(mockClient.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO stabilize_migrations (name, applied_at) VALUES (?, ?)'),
+      ['create_test_table', expect.any(String)]
+    );
+    expect(mockClient.close).toHaveBeenCalled();
+  });
 });
