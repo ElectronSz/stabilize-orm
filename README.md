@@ -223,11 +223,11 @@ const users = await userRepository.find().paginate(2, 10).execute(dbClient);
 Or, use the query builder:
 
 ```typescript
-const page = await userRepository
+const users = await userRepository
   .find()
-  .where("isActive = ?", true)
+  .where('isActive = ?', true)
   .paginate(1, 20)
-  .execute();
+  .execute(dbClient);
 ```
 
 ---

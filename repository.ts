@@ -70,9 +70,13 @@ export class Repository<T> {
         key,
         {
           name: col.name ?? key,
-          type: typeof col.type === "string" ? col.type : DataTypes[col.type],
+          type: typeof col.type === 'string' ? col.type : DataTypes[col.type],
+          minLength: col.minLength,
+          maxLength: col.maxLength,
+          pattern: col.pattern,
+          customValidator: col.customValidator,
         },
-      ]),
+      ])
     );
     this.relations = Object.fromEntries(
       Object.entries(MetadataStorage.getRelations(model)).map(([key, rel]) => [
