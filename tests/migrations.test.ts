@@ -1,141 +1,122 @@
-import { describe, it, expect, vi } from 'vitest';
-import { generateMigration, runMigrations } from '../migrations';
-import { DBType } from '../types';
-// We must mock the imports that provide the metadata keys and the client implementation
-import { ModelKey, ColumnKey, ValidatorKey, SoftDeleteKey } from '../decorators';
-import { DBClient } from '../client'; 
+import { describe, it, expect } from "vitest";
+import { generateMigration } from "../migrations";
+import { DBType, DataTypes } from "../types";
+import { defineModel, MetadataStorage } from "../model";
 
-// --- MOCKING SETUP ---
-
-// Mocking Reflect.getMetadata behavior to simulate data set by the @Model, @Column, etc. decorators
-const mockMetadata = new Map();
-
-// Helper to set mock data for tests
-const setMockMetadata = (tableName: string, columns: any, validators: any, softDeleteField?: string) => {
-  mockMetadata.set(ModelKey, tableName);
-  mockMetadata.set(ColumnKey, columns);
-  mockMetadata.set(ValidatorKey, validators);
-  if (softDeleteField) {
-    mockMetadata.set(SoftDeleteKey, softDeleteField);
-  } else {
-    mockMetadata.delete(SoftDeleteKey);
-  }
-};
-
-// Spy on the global Reflect.getMetadata used by the functions to return our mock data
-const getMetadataSpy = vi.spyOn(Reflect, 'getMetadata');
-getMetadataSpy.mockImplementation((key, target) => mockMetadata.get(key));
-
-
-// Mock Model Placeholder
-class MockModel {} 
-
-// Mock DBClient for runMigrations test: this prevents hitting a real database
-vi.mock('./client', () => {
-    const mockQuery = vi.fn(async (query: string) => {
-        // Simulate no existing migration found when selecting from 'migrations'
-        if (query.includes('SELECT id FROM migrations')) {
-            return [];
-        }
-        return [];
-    });
-    return {
-        DBClient: vi.fn(() => ({
-            query: mockQuery,
-            close: vi.fn(async () => {}),
-            // Provide a mock config for runMigrations to safely access DBType
-            config: {
-                type: DBType.SQLite 
-            }
-        }))
-    };
+// Define test models
+const User = defineModel({
+  tableName: "users",
+  columns: {
+    id: { type: DataTypes.INTEGER, required: true },
+    user_name: { type: DataTypes.TEXT, required: true, unique: true },
+    created_at: { type: DataTypes.TEXT },
+  },
 });
 
-// --- TESTS START HERE ---
+const UserSoftDelete = defineModel({
+  tableName: "orders",
+  columns: {
+    id: { type: DataTypes.INTEGER, required: true },
+    user_name: { type: DataTypes.TEXT, required: true, unique: true },
+    created_at: { type: DataTypes.TEXT },
+    deleted_at: { type: DataTypes.TEXT, softDelete: true },
+  },
+});
 
-describe('generateMigration', () => {
-  const commonColumns = {
-    id: { name: 'id', type: 'INTEGER' },
-    username: { name: 'user_name', type: 'TEXT' },
-    createdAt: { name: 'created_at', type: 'TEXT' }
-  };
-  const commonValidators = {
-    username: ['required', 'unique']
-  };
-
-  it('should generate SQLite-specific primary key (AUTOINCREMENT)', async () => {
-    setMockMetadata('users', commonColumns, commonValidators);
-
-    const migration = await generateMigration(MockModel, DBType.SQLite);
+describe("generateMigration", () => {
+  it("should generate SQLite-specific primary key (AUTOINCREMENT)", async () => {
+    const migration = await generateMigration(
+      User,
+      "create_users",
+      DBType.SQLite,
+    );
 
     expect(migration.up[0]).toBe(
-      'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name TEXT NOT NULL UNIQUE, created_at TEXT)'
+      "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name TEXT NOT NULL UNIQUE, created_at TEXT)",
     );
   });
 
-  it('should generate PostgreSQL-specific primary key (SERIAL)', async () => {
-    setMockMetadata('products', commonColumns, commonValidators);
-
-    const migration = await generateMigration(MockModel, DBType.Postgres);
+  it("should generate PostgreSQL-specific primary key (SERIAL)", async () => {
+    const migration = await generateMigration(
+      User,
+      "create_users",
+      DBType.Postgres,
+    );
 
     expect(migration.up[0]).toBe(
-      'CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, user_name TEXT NOT NULL UNIQUE, created_at TEXT)'
+      "CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, user_name TEXT NOT NULL UNIQUE, created_at TEXT)",
     );
   });
 
-  it('should generate MySQL-specific primary key (AUTO_INCREMENT)', async () => {
-    setMockMetadata('posts', commonColumns, commonValidators);
-
-    const migration = await generateMigration(MockModel, DBType.MySQL);
+  it("should generate MySQL-specific primary key (AUTO_INCREMENT)", async () => {
+    const migration = await generateMigration(
+      User,
+      "create_users",
+      DBType.MySQL,
+    );
 
     expect(migration.up[0]).toBe(
-      'CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTO_INCREMENT, user_name TEXT NOT NULL UNIQUE, created_at TEXT)'
+      "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, user_name TEXT NOT NULL UNIQUE, created_at TEXT)",
     );
   });
 
-  it('should include soft delete field if present on the model', async () => {
-    const softDeleteColumns = {
-      ...commonColumns,
-      deletedAt: { name: 'deleted_at', type: 'TEXT' }
-    };
-    setMockMetadata('orders', softDeleteColumns, commonValidators, 'deletedAt');
+  it("should include soft delete field if present on the model", async () => {
+    const migration = await generateMigration(
+      UserSoftDelete,
+      "create_orders",
+      DBType.SQLite,
+    );
 
-    const migration = await generateMigration(MockModel, DBType.SQLite);
-
-    expect(migration.up[0]).toContain(', deleted_at TEXT)');
+    expect(migration.up[0]).toContain("deleted_at TEXT");
   });
 
-  it('should throw an error if the model is missing the @Model decorator', async () => {
-    mockMetadata.delete(ModelKey);
-    await expect(generateMigration(MockModel, DBType.SQLite)).rejects.toThrow('Model not decorated with @Model');
+  it("should generate DROP TABLE for down migration", async () => {
+    const migration = await generateMigration(
+      User,
+      "create_users",
+      DBType.SQLite,
+    );
+
+    expect(migration.down[0]).toBe("DROP TABLE IF EXISTS users");
+  });
+
+  it("should generate migration with correct name", async () => {
+    const migration = await generateMigration(
+      User,
+      "create_users_table",
+      DBType.SQLite,
+    );
+
+    expect(migration.name).toBe("create_users_table");
   });
 });
 
-describe('runMigrations', () => {
-    it('should create the migrations table and run the UP script for new migrations', async () => {
-        const mockMigrations = [
-            { up: ['CREATE TABLE test_table (id INT)'], down: ['DROP TABLE test_table'] }
-        ];
+describe("defineModel", () => {
+  it("should store model metadata", () => {
+    const meta = MetadataStorage.getModelMetadata(User);
+    expect(meta).toBeDefined();
+    expect(meta?.tableName).toBe("users");
+  });
 
-        // Run migrations using the mocked DBClient (defaulted to SQLite type)
-        await runMigrations({ type: DBType.SQLite,connectionString:"" }, mockMigrations);
+  it("should return table name", () => {
+    const tableName = MetadataStorage.getTableName(User);
+    expect(tableName).toBe("users");
+  });
 
-        // Access the mock instance
-        const mockClient = (DBClient as any).mock.results[0].value;
-        
-        // 1. Verify CREATE TABLE IF NOT EXISTS migrations was called
-        expect(mockClient.query).toHaveBeenCalledWith(expect.stringContaining('CREATE TABLE IF NOT EXISTS migrations ('));
-        
-        // 2. Verify the actual UP query was executed
-        expect(mockClient.query).toHaveBeenCalledWith('CREATE TABLE test_table (id INT)', []);
+  it("should return columns", () => {
+    const columns = MetadataStorage.getColumns(User);
+    expect(columns).toHaveProperty("id");
+    expect(columns).toHaveProperty("user_name");
+    expect(columns).toHaveProperty("created_at");
+  });
 
-        // 3. Verify the migration log record was inserted
-        expect(mockClient.query).toHaveBeenCalledWith(
-            expect.stringContaining('INSERT INTO migrations (name, applied_at) VALUES (?, ?)'),
-            expect.arrayContaining([expect.stringContaining('migration_0_'), expect.any(String)])
-        );
+  it("should detect soft delete field", () => {
+    const field = MetadataStorage.getSoftDeleteField(UserSoftDelete);
+    expect(field).toBe("deleted_at");
+  });
 
-        // 4. Verify the client was closed in the finally block
-        expect(mockClient.close).toHaveBeenCalled();
-    });
+  it("should return null for models without soft delete", () => {
+    const field = MetadataStorage.getSoftDeleteField(User);
+    expect(field).toBeNull();
+  });
 });

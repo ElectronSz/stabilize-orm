@@ -26,7 +26,7 @@ export interface Hook {
 // Extend ModelConfig to include hooks
 declare module "./model" {
   interface ModelConfig {
-    hooks?:  Partial<Record<HookType, HookCallback | HookCallback[]>>;
+    hooks?: Partial<Record<HookType, HookCallback | HookCallback[]>>;
   }
 }
 
@@ -35,8 +35,14 @@ declare module "./model" {
  * @param model The model class.
  * @param hooks A record of hook types to their callbacks.
  */
-export function registerHooks(model: Function, hooks: Record<HookType, HookCallback | HookCallback[]>) {
-  const config = MetadataStorage.getModelMetadata(model) || { tableName: "", columns: {} };
+export function registerHooks(
+  model: Function,
+  hooks: Record<HookType, HookCallback | HookCallback[]>,
+) {
+  const config = MetadataStorage.getModelMetadata(model) || {
+    tableName: "",
+    columns: {},
+  };
   config.hooks = { ...config.hooks, ...hooks };
   MetadataStorage.setModelMetadata(model, config);
 }
@@ -50,7 +56,10 @@ export function registerHooks(model: Function, hooks: Record<HookType, HookCallb
  */
 export function getHooks(entity: any, type: HookType): Hook[] {
   const hooks: Hook[] = [];
-  const model = Object.getPrototypeOf(entity).constructor;
+  if (!entity) return hooks;
+  const proto = Object.getPrototypeOf(entity);
+  if (!proto) return hooks;
+  const model = proto.constructor;
 
   // Get hooks from MetadataStorage
   const config = MetadataStorage.getModelMetadata(model);
@@ -58,10 +67,12 @@ export function getHooks(entity: any, type: HookType): Hook[] {
     const callbacks = Array.isArray(config.hooks[type])
       ? config.hooks[type]
       : [config.hooks[type]];
-    hooks.push(...callbacks.map(callback => ({
-      type,
-      callback: () => callback(entity),
-    })));
+    hooks.push(
+      ...callbacks.map((callback) => ({
+        type,
+        callback: () => callback(entity),
+      })),
+    );
   }
 
   // Get hooks from class methods

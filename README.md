@@ -1,6 +1,7 @@
 # Stabilize ORM
 
 _A Modern, Type-Safe, and Expressive ORM for Bun_
+
 <p align="left">
   <img src="./public/logo_both-transparent.png" alt="Stabilize ORM Logo" width="280" />
 </p>
@@ -8,7 +9,7 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 <p align="left">
   <a href="https://www.npmjs.com/package/stabilize-orm"><img src="https://img.shields.io/npm/v/stabilize-orm.svg?label=version&color=blue" alt="NPM Version"></a>
   <a href="https://github.com/ElectronSz/stabilize-cli/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/stabilize-orm.svg?color=green" alt="License"></a>
-  <a href="https://github.com/ElectronSz/stabilize-cli"><img src="https://img.shields.io/badge/Cli-Stabilize%201.2.0-blue.svg" alt="Stabilize CLI"></a>
+  <a href="https://github.com/ElectronSz/stabilize-cli"><img src="https://img.shields.io/badge/Cli-Stabilize%202.1.0-blue.svg" alt="Stabilize CLI"></a>
   <a href="#"><img src="https://img.shields.io/badge/PostgreSQL-supported-blue" alt="PostgreSQL"></a>
   <a href="#"><img src="https://img.shields.io/badge/MySQL-supported-blue" alt="MySQL"></a>
   <a href="#"><img src="https://img.shields.io/badge/SQLite-supported-blue" alt="SQLite"></a>
@@ -17,7 +18,6 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 </a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
 </p>
-
 
 **Stabilize** is a lightweight, feature-rich ORM designed for performance and developer experience. It provides a unified, database-agnostic API for **PostgreSQL**, **MySQL**, and **SQLite**. Powered by a robust query builder, programmatic model definitions, automatic versioning, and a full-featured command-line interface, Stabilize is built to scale with your app.
 
@@ -44,6 +44,45 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 - **Caching Layer**: Optional Redis-backed caching with `cache-aside` and `write-through` strategies.
 - **Custom Query Scopes**: Define reusable query conditions (scopes) in models for simplified, reusable filtering logic.
 - **Timestamps**: Automatically manage `createdAt` and `updatedAt` columns for tracking record creation and update times.
+- **SQL Default Expressions**: Support database-side default expressions (e.g., `gen_random_uuid()`, `NOW()`) for columns using the `sqlDefault()` helper.
+- **Nested Relations (Eager Loading)**: Load deeply nested relations using dot notation like `"roles.permissions"`.
+- **AutoMigrate with Index Management**: Automatically create, detect, and remove indexes and unique constraints during migration.
+- **Advanced Query Builder Filters**: Chainable `.orWhere()`, `.whereIn()`, `.whereNotIn()`, `.whereNull()`, `.whereNotNull()`, `.whereBetween()`, `.groupBy()`, `.having()`, `.lock()` methods.
+- **Optimistic Locking**: Add `optimisticLock: true` to a version column to automatically detect concurrent modification conflicts and throw `CONCURRENT_MODIFICATION` errors.
+- **findAndCount**: Get paginated results with a total count in one call.
+- **findOneBy / findBy**: TypeORM-style conditional finders without writing raw SQL.
+- **Aggregate Queries**: Run `count()`, `sum()`, `avg()`, `min()`, `max()` directly from the repository or query builder.
+- **Cursor-Based Pagination**: Efficient forward/backward cursor pagination for large datasets (Prisma-style `findMany`).
+- **exists**: Check if a record exists without loading it.
+- **recoverAll**: Bulk restore all soft-deleted records.
+- **truncate**: Clear all rows from a table.
+- **seed / defineSeed**: Laravel-style seeding framework with `defineSeed` and `runSeeds`.
+- **resetDatabase**: Drop tables, re-migrate, and optionally re-seed for development.
+- **healthCheck**: Get database and table health status with latency for monitoring endpoints.
+- **rawQuery / rawExec**: Execute raw SQL directly from the `Stabilize` instance.
+- **bulkUpsert**: Upsert multiple records in a single transaction.
+- **findMany**: Prisma-style query with `where`, `cursor`, `take`, `skip`, `orderBy`.
+- **countDistinct**: Count unique values in a column.
+- **increment / decrement**: Atomically increment or decrement a numeric field.
+- **pluck**: Get an array of a single column's values (Rails-style).
+- **selectColumns**: Get only specific columns from a query.
+- **toggle**: Toggle a boolean field (Rails-style).
+- **updateBy / deleteBy**: Conditional bulk updates and deletes without writing SQL.
+- **restoreBy**: Restore soft-deleted records matching conditions.
+- **findDeleted / withTrashed**: Query soft-deleted or all records.
+- **upsertMany**: Batch upsert in configurable batch sizes.
+- **map / each / eachBatch**: Transform, iterate, and batch-process query results.
+- **lockForUpdate**: Pessimistic row locking for read-modify-write.
+- **firstOrCreate / updateOrCreate**: Laravel-style find-or-create patterns.
+- **first / last / random**: Single-record shortcuts.
+- **StabilizeEmitter**: Event system for `query`, `error`, `connection:open/close`, `transaction:start/complete/error`.
+- **TransactionIsolationLevel**: Type for `READ UNCOMMITTED`, `READ COMMITTED`, `REPEATABLE READ`, `SERIALIZABLE`.
+- **generateUUID**: Cross-runtime UUID generation helper.
+- **poolStats**: Get connection pool statistics.
+- **Database Backup & Restore**: `db:backup` and `db:restore` commands for database backup management.
+- **API Generation**: `generate:api` command scaffolds full CRUD REST API routes from models.
+- **Fresh Migrations**: `migrate:fresh` drops all tables and re-runs migrations without seeding.
+- **Database Size Analysis**: `db:size` command shows table sizes and row count statistics.
 
 ---
 
@@ -71,6 +110,15 @@ npm install stabilize-orm
 - [Support](./SUPPORT.md)
 - [Funding](./FUNDING.md)
 
+### Examples
+
+- [Blog](./examples/blog.ts) - Blog with users, posts, comments, and versioning
+- [E-Commerce](./examples/ecommerce.ts) - Products, categories, orders with transactions
+- [REST API](./examples/rest-api.ts) - Express.js REST API with pagination and optimistic locking
+- [SaaS](./examples/saas.ts) - Multi-tenant SaaS with tenants, members, and scoped projects
+- [CMS](./examples/cms.ts) - Content management with authors, categories, articles, and versioning
+- [Analytics](./examples/analytics.ts) - Event tracking with aggregations and metrics
+
 ---
 
 ## ⚙️ Configuration
@@ -83,7 +131,8 @@ import { DBType, type DBConfig } from "stabilize-orm";
 
 const dbConfig: DBConfig = {
   type: DBType.Postgres,
-  connectionString: process.env.DATABASE_URL || "postgres://user:password@localhost:5432/mydb",
+  connectionString:
+    process.env.DATABASE_URL || "postgres://user:password@localhost:5432/mydb",
   retryAttempts: 3,
   retryDelay: 1000,
 };
@@ -95,7 +144,12 @@ Next, create a central ORM instance for your application.
 
 ```typescript
 // db.ts
-import { Stabilize, type CacheConfig, type LoggerConfig, LogLevel } from "stabilize-orm";
+import {
+  Stabilize,
+  type CacheConfig,
+  type LoggerConfig,
+  LogLevel,
+} from "stabilize-orm";
 import dbConfig from "./database";
 
 const cacheConfig: CacheConfig = {
@@ -132,7 +186,12 @@ const User = defineModel({
   versioned: true,
   columns: {
     id: { type: DataTypes.Integer, required: true },
-    email: { type: DataTypes.String, length: 100, required: true, unique: true },
+    email: {
+      type: DataTypes.String,
+      length: 100,
+      required: true,
+      unique: true,
+    },
   },
   relations: [
     {
@@ -164,7 +223,11 @@ const page = await userRepository.paginate(2, 10);
 Or, use the query builder:
 
 ```typescript
-const page = await userRepository.find().where('isActive = ?', true).paginate(1, 20).execute();
+const page = await userRepository
+  .find()
+  .where("isActive = ?", true)
+  .paginate(1, 20)
+  .execute();
 ```
 
 ---
@@ -191,7 +254,9 @@ const User = defineModel({
       unique: true,
       minLength: 6,
       pattern: /^[^@]+@[^@]+\.[^@]+$/,
-      customValidator: (val) => val.endsWith("@offbytesecure.com") || "Must use an @offbytesecure.com email"
+      customValidator: (val) =>
+        val.endsWith("@offbytesecure.com") ||
+        "Must use an @offbytesecure.com email",
     },
     password: { type: DataTypes.String, minLength: 8 },
   },
@@ -288,46 +353,96 @@ Stabilize includes a powerful CLI for managing your workflow. See: [stabilize-cl
 ### Generating Files
 
 - **Generate a model**:
-    ```bash
-    stabilize-cli generate model Product
-    ```
+
+  ```bash
+  stabilize-cli generate:model Product
+  ```
 
 - **Generate a migration from a model**:
-    ```bash
-    stabilize-cli generate migration User
-    ```
+
+  ```bash
+  stabilize-cli generate:migration User
+  ```
 
 - **Generate a seed file**:
-    ```bash
-    stabilize-cli generate seed InitialRoles
-    ```
+
+  ```bash
+  stabilize-cli generate:seed InitialRoles
+  ```
+
+- **Generate a REST API scaffold**:
+  ```bash
+  stabilize-cli generate:api User
+  ```
 
 ### Database & Migration Management
 
 - **Run all pending migrations**:
-    ```bash
-    stabilize-cli migrate
-    ```
+
+  ```bash
+  stabilize-cli migrate
+  ```
 
 - **Roll back the last migration**:
-    ```bash
-    stabilize-cli migrate:rollback
-    ```
+
+  ```bash
+  stabilize-cli migrate:rollback
+  ```
+
+- **Fresh migration (drop + re-migrate)**:
+
+  ```bash
+  stabilize-cli migrate:fresh --force
+  ```
 
 - **Run all pending seeds (in dependency order)**:
-    ```bash
-    stabilize-cli seed
-    ```
+
+  ```bash
+  stabilize-cli seed
+  ```
 
 - **Check the status of migrations and seeds**:
-    ```bash
-    stabilize-cli status
-    ```
+
+  ```bash
+  stabilize-cli status
+  ```
 
 - **Reset the database (drop, migrate, seed)**:
-    ```bash
-    stabilize-cli db:reset
-    ```
+  ```bash
+  stabilize-cli db:reset
+  ```
+
+### Backup & Restore
+
+- **Backup the database**:
+
+  ```bash
+  stabilize-cli db:backup
+  ```
+
+- **Restore from a backup**:
+  ```bash
+  stabilize-cli db:restore backups/backup_20250101120000.db --force
+  ```
+
+### Diagnostics
+
+- **Database size statistics**:
+
+  ```bash
+  stabilize-cli db:size
+  ```
+
+- **Health check**:
+
+  ```bash
+  stabilize-cli health
+  ```
+
+- **CLI info**:
+  ```bash
+  stabilize-cli info
+  ```
 
 ---
 
@@ -343,7 +458,9 @@ const userRepository = orm.getRepository(User);
 
 const newUser = await userRepository.create({ email: "lwazicd@icloud.com" });
 const foundUser = await userRepository.findOne(newUser.id);
-const updatedUser = await userRepository.update(newUser.id, { email: "admin@offbytesecure.com" });
+const updatedUser = await userRepository.update(newUser.id, {
+  email: "admin@offbytesecure.com",
+});
 await userRepository.delete(newUser.id);
 ```
 
@@ -369,11 +486,22 @@ console.log(activeAdmins);
 {
   select(...fields: string[]): QueryBuilder<User>;
   where(condition: string, ...params: any[]): QueryBuilder<User>;
+  orWhere(condition: string, ...params: any[]): QueryBuilder<User>;
+  whereIn(column: string, values: any[]): QueryBuilder<User>;
+  whereNotIn(column: string, values: any[]): QueryBuilder<User>;
+  whereNull(column: string): QueryBuilder<User>;
+  whereNotNull(column: string): QueryBuilder<User>;
+  whereBetween(column: string, start: any, end: any): QueryBuilder<User>;
+  groupBy(clause: string): QueryBuilder<User>;
+  having(condition: string, ...params: any[]): QueryBuilder<User>;
   join(table: string, condition: string): QueryBuilder<User>;
   orderBy(clause: string): QueryBuilder<User>;
   limit(limit: number): QueryBuilder<User>;
   offset(offset: number): QueryBuilder<User>;
+  lock(mode?: "FOR UPDATE" | "FOR SHARE"): QueryBuilder<User>;
+  withRelations(...relations: string[]): QueryBuilder<User>;
   scope(name: string, ...args: any[]): QueryBuilder<User>;
+  paginate(page: number, pageSize: number): QueryBuilder<User>;
   build(): { query: string; params: any[] };
   execute(client?: DBClient, cache?: Cache, cacheKey?: string): Promise<User[]>;
 }
@@ -400,7 +528,11 @@ const User = defineModel({
   },
   scopes: {
     active: (qb) => qb.where("isActive = ?", true),
-    recent: (qb, days: number) => qb.where("createdAt >= ?", new Date(Date.now() - days * 24 * 60 * 60 * 1000)),
+    recent: (qb, days: number) =>
+      qb.where(
+        "createdAt >= ?",
+        new Date(Date.now() - days * 24 * 60 * 60 * 1000),
+      ),
   },
 });
 
@@ -454,7 +586,9 @@ const newUser = await userRepository.create({ email: "lwazicd@icloud.com" });
 console.log(newUser.createdAt, newUser.updatedAt); // Outputs current timestamp
 
 // Update a user (updatedAt updated automatically)
-const updatedUser = await userRepository.update(newUser.id, { email: "admin@offbytesecure.com" });
+const updatedUser = await userRepository.update(newUser.id, {
+  email: "admin@offbytesecure.com",
+});
 console.log(updatedUser.updatedAt); // Outputs new timestamp
 
 // Bulk create users
@@ -462,7 +596,7 @@ const newUsers = await userRepository.bulkCreate([
   { email: "user1@example.com" },
   { email: "user2@example.com" },
 ]);
-console.log(newUsers.map(u => u.createdAt)); // Outputs timestamps for each user
+console.log(newUsers.map((u) => u.createdAt)); // Outputs timestamps for each user
 ```
 
 ---
@@ -544,6 +678,410 @@ app.listen(3000, () => {
 
 ---
 
+## 🔒 Optimistic Locking
+
+Enable optimistic locking to detect concurrent modifications. Add `optimisticLock: true` to a version column in your model.
+
+```typescript
+import { defineModel, DataTypes } from "stabilize-orm";
+
+const User = defineModel({
+  tableName: "users",
+  columns: {
+    id: { type: DataTypes.Integer, required: true },
+    name: { type: DataTypes.String },
+    version: { type: DataTypes.Integer, optimisticLock: true },
+  },
+});
+
+const userRepository = orm.getRepository(User);
+
+// Create with initial version
+const user = await userRepository.create({ name: "Lwazi", version: 1 });
+
+// Update - version is automatically incremented
+// If another transaction modified the record, a CONCURRENT_MODIFICATION error is thrown
+try {
+  await userRepository.update(user.id, {
+    name: "Updated",
+    version: user.version,
+  });
+} catch (err) {
+  if (err.code === "CONCURRENT_MODIFICATION") {
+    console.log("Record was modified by another transaction");
+  }
+}
+```
+
+---
+
+## ⏱️ SQL Default Expressions
+
+Use `sqlDefault()` to set database-side default values for columns (e.g., `gen_random_uuid()`, `NOW()`).
+
+```typescript
+import { defineModel, DataTypes, sqlDefault } from "stabilize-orm";
+
+const User = defineModel({
+  tableName: "users",
+  columns: {
+    id: {
+      type: DataTypes.UUID,
+      required: true,
+      defaultExpression: sqlDefault("gen_random_uuid()"),
+    },
+    name: { type: DataTypes.String },
+    createdAt: {
+      type: DataTypes.DateTime,
+      defaultExpression: sqlDefault("NOW()"),
+    },
+  },
+});
+```
+
+---
+
+## 📊 Advanced Query Builder
+
+The query builder now supports additional filter methods:
+
+```typescript
+const results = await userRepository
+  .find()
+  .where("status = ?", "active")
+  .orWhere("role = ?", "admin")
+  .whereIn("age", [25, 30, 35])
+  .whereBetween("createdAt", new Date("2025-01-01"), new Date("2025-12-31"))
+  .whereNull("deletedAt")
+  .groupBy("department")
+  .having("COUNT(*) > ?", 5)
+  .orderBy("createdAt DESC")
+  .limit(10)
+  .execute();
+```
+
+---
+
+## 🔗 Nested Relations
+
+Load deeply nested relations using dot notation:
+
+```typescript
+const user = await userRepository.findOne(1, {
+  relations: ["roles", "roles.permissions"],
+});
+```
+
+---
+
+## 📊 Aggregation Queries
+
+Run aggregate queries directly on the repository or query builder.
+
+```typescript
+// Repository-level aggregates
+const total = await userRepository.count();
+const exists = await userRepository.exists({
+  email: "admin@offbytesecure.com",
+});
+
+const stats = await userRepository.aggregate({
+  count: "*",
+  sum: ["salary"],
+  avg: ["salary"],
+  min: ["salary"],
+  max: ["salary"],
+});
+// stats = { count_: 100, sum_salary: 5000000, avg_salary: 50000, min_salary: 20000, max_salary: 150000 }
+```
+
+---
+
+## 🔎 findOneBy / findBy
+
+TypeORM-style conditional finders without writing raw SQL.
+
+```typescript
+// Find one record by condition
+const user = await userRepository.findOneBy({ email: "lwazicd@icloud.com" });
+
+// Find multiple records
+const admins = await userRepository.findBy(
+  { role: "admin" },
+  { limit: 10, orderBy: "createdAt DESC" },
+);
+
+// Combined with relations
+const user = await userRepository.findOneBy(
+  { email: "lwazicd@icloud.com" },
+  { relations: ["roles"] },
+);
+```
+
+---
+
+## 🔢 findAndCount
+
+Get paginated results with a total count in a single call.
+
+```typescript
+const { data, total } = await userRepository.findAndCount();
+console.log(`Showing ${data.length} of ${total} total records`);
+```
+
+---
+
+## 🖱️ Cursor-Based Pagination
+
+Efficient cursor-based pagination for large datasets.
+
+```typescript
+// First page
+const page1 = await userRepository.findMany({
+  take: 10,
+  orderBy: { field: "id", direction: "ASC" },
+});
+
+// Next page using cursor
+const lastId = page1[page1.length - 1].id;
+const page2 = await userRepository.findMany({
+  cursor: { field: "id", value: lastId, direction: "forward" },
+  take: 10,
+  orderBy: { field: "id", direction: "ASC" },
+});
+```
+
+---
+
+## 🌱 Database Seeding
+
+Define and run seeds for populating development/test databases.
+
+```typescript
+import { defineSeed, runSeeds, resetDatabase } from "stabilize-orm";
+
+// Define a seed
+defineSeed("create-default-roles", async (db) => {
+  const roleRepo = orm.getRepository(Role);
+  await roleRepo.bulkCreate([
+    { name: "Admin", permissions: "all" },
+    { name: "User", permissions: "read" },
+  ]);
+});
+
+// Run all seeds
+await runSeeds(orm.client);
+
+// Reset database (drop, migrate, seed)
+await resetDatabase(orm.client, [User, Role]);
+```
+
+---
+
+## 🏥 Health Check
+
+Monitor database and cache connectivity with latency.
+
+```typescript
+const health = await orm.healthCheck();
+// { status: "healthy", database: "postgres", latencyMs: 12.5, cacheStatus: "connected" }
+
+// Per-table health
+const userHealth = await userRepository.healthCheck();
+// { status: "healthy", table: "users", rows: 142, latencyMs: 8.3 }
+```
+
+---
+
+## 📂 Bulk Upsert
+
+Upsert multiple records in a single transaction.
+
+```typescript
+const users = await userRepository.bulkUpsert(
+  [
+    { email: "lwazicd@icloud.com", name: "Lwazi" },
+    { email: "ciniso@icloud.com", name: "Ciniso" },
+  ],
+  ["email"], // unique key(s)
+);
+```
+
+---
+
+## 🔧 Raw SQL
+
+Execute raw SQL queries directly from the ORM instance.
+
+```typescript
+const results = await orm.rawQuery("SELECT * FROM users WHERE age > ?", [25]);
+const { affectedRows } = await orm.rawExec(
+  "UPDATE users SET active = false WHERE last_login < ?",
+  [oneYearAgo],
+);
+```
+
+---
+
+## 🗑️ recoverAll / truncate
+
+```typescript
+// Restore all soft-deleted records
+const recovered = await userRepository.recoverAll();
+console.log(`Recovered ${recovered} records`);
+
+// Clear the table
+await userRepository.truncate();
+```
+
+---
+
+## ⬆️⬇️ Increment / Decrement
+
+Atomically update numeric fields without loading the record.
+
+```typescript
+const updated = await userRepository.increment(user.id, "loginCount", 1);
+const updated = await userRepository.decrement(user.id, "credits", 5);
+```
+
+---
+
+## 🏷️ Pluck / SelectColumns
+
+```typescript
+// Get just the email column as an array
+const emails = await userRepository.pluck("email");
+// ["lwazicd@icloud.com", "ciniso@icloud.com", ...]
+
+// Get specific columns
+const users = await userRepository.selectColumns("id", "email");
+// [{ id: 1, email: "lwazicd@icloud.com" }, ...]
+```
+
+---
+
+## 🔄 Toggle
+
+Toggle a boolean field.
+
+```typescript
+const toggled = await userRepository.toggle(user.id, "isActive");
+// isActive was true, now false (or vice versa)
+```
+
+---
+
+## ✏️ updateBy / deleteBy
+
+```typescript
+// Update all active users' role to "member"
+const updated = await userRepository.updateBy(
+  { isActive: true },
+  { role: "member" },
+);
+
+// Delete all users with null email
+const deleted = await userRepository.deleteBy({ email: null });
+```
+
+---
+
+## 🕳️ findDeleted / withTrashed
+
+```typescript
+// Get only soft-deleted records
+const deletedUsers = await userRepository.findDeleted().execute();
+
+// Get all records including soft-deleted
+const allUsers = await userRepository.withTrashed().execute();
+
+// Restore matching soft-deleted records
+const restored = await userRepository.restoreBy({ role: "admin" });
+```
+
+---
+
+## 🔄 firstOrCreate / updateOrCreate
+
+```typescript
+// Find or create in one call
+const user = await userRepository.firstOrCreate(
+  { email: "lwazicd@icloud.com" },
+  { name: "Lwazi" },
+);
+
+// Find and update, or create if not found
+const user = await userRepository.updateOrCreate(
+  { email: "lwazicd@icloud.com" },
+  { name: "Updated Name" },
+);
+```
+
+---
+
+## 🥇 first / last / random
+
+```typescript
+const firstUser = await userRepository.first();
+const admin = await userRepository.first({ role: "admin" });
+const lastUser = await userRepository.last();
+const randomUser = await userRepository.random();
+```
+
+---
+
+## 🔒 Pessimistic Locking (lockForUpdate)
+
+```typescript
+const user = await userRepository.lockForUpdate(user.id);
+// The row is now locked for the duration of the transaction
+```
+
+---
+
+## 📡 Event Emitter
+
+Subscribe to ORM lifecycle events.
+
+```typescript
+const orm = new Stabilize(dbConfig);
+
+orm.events.on("query", (entry) => {
+  console.log(`[${entry.durationMs}ms] ${entry.query}`);
+});
+
+orm.events.on("error", (err) => {
+  console.error("ORM error:", err);
+});
+
+orm.events.on("connection:open", (dbType) => {
+  console.log(`Connected to ${dbType}`);
+});
+```
+
+---
+
+## 📦 Pool Stats
+
+```typescript
+const stats = await orm.poolStats();
+// { active: 5, idle: 10, total: 15 }
+```
+
+---
+
+## 🆔 generateUUID
+
+```typescript
+import { generateUUID } from "stabilize-orm";
+
+const id = generateUUID();
+// "550e8400-e29b-41d4-a716-446655440000"
+```
+
+---
+
 ## 📑 License
 
 Licensed under the MIT License. See [LICENSE.md](./LICENSE.md) for details.
@@ -554,6 +1092,6 @@ Licensed under the MIT License. See [LICENSE.md](./LICENSE.md) for details.
 
 Created with ❤️ by **ElectronSz**
 <br/>
-<em>File last updated: 2025-10-19 11:12:00 SAST</em>
+<em>File last updated: 2026-04-02</em>
 
 </div>

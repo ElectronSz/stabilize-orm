@@ -7,11 +7,7 @@
 import { Database, Statement } from "bun:sqlite";
 import { Pool, type PoolClient } from "pg";
 import mysql from "mysql2/promise";
-import {
-  type DBConfig,
-  StabilizeError,
-  DBType,
-} from "./types";
+import { type DBConfig, StabilizeError, DBType } from "./types";
 import { type Logger, StabilizeLogger } from "./logger";
 
 /**
@@ -38,14 +34,19 @@ function isMySQLConfig(config: DBConfig): boolean {
  * @returns True if the client is a MySQL pool, false otherwise.
  */
 function isMySQLPool(client: any): client is mysql.Pool {
-  return typeof client.getConnection === 'function';
+  return typeof client.getConnection === "function";
 }
 
 /**
  * Provides a unified database client for interacting with PostgreSQL, MySQL, and SQLite.
  */
 export class DBClient {
-  private client!: Database | Pool | mysql.Pool | PoolClient | mysql.PoolConnection;
+  private client!:
+    | Database
+    | Pool
+    | mysql.Pool
+    | PoolClient
+    | mysql.PoolConnection;
   private logger: Logger;
   public readonly config: DBConfig;
   private retryAttempts: number;
@@ -53,7 +54,7 @@ export class DBClient {
   private maxJitter: number;
 
   private preparedStatements: Map<string, Statement> = new Map();
-  public readonly isTransactionClient: boolean = false;
+  public isTransactionClient: boolean = false;
 
   /**
    * Constructs a new DBClient instance.
@@ -91,7 +92,7 @@ export class DBClient {
     } else if (isMySQLConfig(config)) {
       this.client = mysql.createPool(config.connectionString);
       this.logger.logDebug(`Initialized MySQL Pool client.`);
-    } else if (config.type = DBType.Postgres) { // NOTE: single '=' should be '===', this is likely a bug
+    } else if (config.type === DBType.Postgres) {
       this.client = new Pool({ connectionString: config.connectionString! });
       this.logger.logDebug(`Initialized Postgres Pool client.`);
     }
@@ -127,27 +128,41 @@ export class DBClient {
         } else if (this.config.type === DBType.MySQL) {
           const [rows] = await (this.client as mysql.Pool).query(query, params);
           result = rows;
-        } else if (this.config.type === DBType.Postgres ) {
+        } else if (this.config.type === DBType.Postgres) {
           let paramIndex = 0;
           const pgQuery = query.replace(/\?/g, () => `$${++paramIndex}`);
           const pgResult = await (this.client as Pool).query(pgQuery, params);
           result = Array.isArray(pgResult.rows) ? pgResult.rows : [];
         } else {
-          throw new StabilizeError("Unknown database client type", "QUERY_ERROR");
+          throw new StabilizeError(
+            "Unknown database client type",
+            "QUERY_ERROR",
+          );
         }
 
         const executionTime = Date.now() - start;
         this.logger.logQuery(query, params, executionTime);
-        return Array.isArray(result) ? result as T[] : [];
+        return Array.isArray(result) ? (result as T[]) : [];
       } catch (error) {
         this.logger.logError(error as Error);
         if (attempt === this.retryAttempts) {
-          throw new StabilizeError(`Query failed after ${this.retryAttempts} attempts: ${(error as Error).message}`, "QUERY_ERROR");
+          throw new StabilizeError(
+            `Query failed after ${this.retryAttempts} attempts: ${(error as Error).message}`,
+            "QUERY_ERROR",
+          );
         }
-        await new Promise(res => setTimeout(res, this.retryDelay * Math.pow(2, attempt - 1) + this.getJitter()));
+        await new Promise((res) =>
+          setTimeout(
+            res,
+            this.retryDelay * Math.pow(2, attempt - 1) + this.getJitter(),
+          ),
+        );
       }
     }
-    throw new StabilizeError("Query failed: maximum retries reached without success", "QUERY_ERROR");
+    throw new StabilizeError(
+      "Query failed: maximum retries reached without success",
+      "QUERY_ERROR",
+    );
   }
 
   /**
@@ -157,12 +172,16 @@ export class DBClient {
    * @returns The result of the callback.
    * @throws StabilizeError if transactions are not supported or rollback is triggered.
    */
-  async transaction<T>(callback: (txClient: DBClient) => Promise<T>): Promise<T> {
+  async transaction<T>(
+    callback: (txClient: DBClient) => Promise<T>,
+  ): Promise<T> {
     if (this.isTransactionClient) return callback(this);
 
     if (this.client instanceof Database) {
-      const tx = this.client.transaction(() => callback(this));
-      return tx();
+      const tx = this.client.transaction(async () => {
+        return await callback(this);
+      });
+      return await tx();
     }
 
     if (isMySQLPool(this.client)) {
@@ -201,7 +220,10 @@ export class DBClient {
       }
     }
 
-    throw new StabilizeError("Transaction not supported by this client configuration.", "TX_ERROR");
+    throw new StabilizeError(
+      "Transaction not supported by this client configuration.",
+      "TX_ERROR",
+    );
   }
 
   /**
@@ -212,11 +234,39 @@ export class DBClient {
   async close() {
     if (this.client instanceof Database) {
       this.client.close();
-    } else if (this.client && 'end' in this.client) {
+    } else if (this.client && "end" in this.client) {
       await (this.client as any).end();
     }
     this.client = null!;
     this.logger.logInfo("Database connection closed");
+  }
+
+  async queryExec(
+    query: string,
+    params: any[] = [],
+  ): Promise<{ affectedRows: number }> {
+    const start = Date.now();
+    let affectedRows = 0;
+
+    if (this.client instanceof Database) {
+      const result = this.client.run(query, ...params);
+      affectedRows = result.changes;
+    } else if (this.config.type === DBType.MySQL) {
+      const [mysqlResult] = await (this.client as mysql.Pool).query(
+        query,
+        params,
+      );
+      affectedRows = (mysqlResult as any).affectedRows ?? 0;
+    } else if (this.config.type === DBType.Postgres) {
+      let paramIndex = 0;
+      const pgQuery = query.replace(/\?/g, () => `$${++paramIndex}`);
+      const pgResult = await (this.client as Pool).query(pgQuery, params);
+      affectedRows = pgResult.rowCount ?? 0;
+    }
+
+    const executionTime = Date.now() - start;
+    this.logger.logQuery(query, params, executionTime);
+    return { affectedRows };
   }
 
   /**
@@ -235,9 +285,9 @@ export class DBClient {
         this.preparedStatements.set(query, stmt);
       }
       stmt.run(...params);
-    } else if (isMySQLPool(this.client) || ('query' in this.client && 'release' in this.client && !(this.client instanceof Pool))) {
+    } else if (this.config.type === DBType.MySQL) {
       await (this.client as mysql.Pool).query(query, params);
-    } else if (this.config.type = DBType.Postgres) { // NOTE: single '=' should be '===', this is likely a bug
+    } else if (this.config.type === DBType.Postgres) {
       let paramIndex = 0;
       const pgQuery = query.replace(/\?/g, () => `$${++paramIndex}`);
       await (this.client as Pool).query(pgQuery, params);

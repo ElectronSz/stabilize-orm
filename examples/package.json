@@ -1,0 +1,21 @@
+{
+  "name": "stabilize-orm-examples",
+  "private": true,
+  "scripts": {
+    "blog": "bun run blog.ts",
+    "ecommerce": "bun run ecommerce.ts",
+    "rest-api": "bun run rest-api.ts",
+    "saas": "bun run saas.ts",
+    "cms": "bun run cms.ts",
+    "analytics": "bun run analytics.ts"
+  },
+  "dependencies": {
+    "stabilize-orm": "file:..",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "typescript": "^5.9.3",
+    "bun-types": "latest"
+  }
+}
