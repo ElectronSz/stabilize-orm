@@ -1,13 +1,74 @@
 {
   "name": "stabilize-orm",
-  "version": "1.3.9",
-  "description": "A lightweight, type-safe ORM for Bun.js with support for SQLite, MySQL, PostgreSQL, and Redis caching",
+  "version": "2.1.0",
+  "description": "A modern, type-safe ORM for Bun, Node.js, and Deno with support for SQLite, MySQL, PostgreSQL, Redis caching, optimistic locking, cursor pagination, and a full-featured query builder.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./model": {
+      "types": "./dist/model.d.ts",
+      "default": "./dist/model.js"
+    },
+    "./auto-migrate": {
+      "types": "./dist/auto-migrate.d.ts",
+      "default": "./dist/auto-migrate.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "default": "./dist/types.js"
+    },
+    "./query-builder": {
+      "types": "./dist/query-builder.d.ts",
+      "default": "./dist/query-builder.js"
+    },
+    "./repository": {
+      "types": "./dist/repository.d.ts",
+      "default": "./dist/repository.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./cache": {
+      "types": "./dist/cache.d.ts",
+      "default": "./dist/cache.js"
+    },
+    "./logger": {
+      "types": "./dist/logger.d.ts",
+      "default": "./dist/logger.js"
+    },
+    "./hooks": {
+      "types": "./dist/hooks.d.ts",
+      "default": "./dist/hooks.js"
+    },
+    "./migrations": {
+      "types": "./dist/migrations.d.ts",
+      "default": "./dist/migrations.js"
+    },
+    "./utils/encryption": {
+      "types": "./dist/utils/encryption.d.ts",
+      "default": "./dist/utils/encryption.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --minify",
-    "prepublishOnly": "bun run build && bun run test",
-    "format": "bunx prettier --write ."
+    "build": "bun run build:js && bun run build:types",
+    "build:js": "bun build index.ts repository.ts query-builder.ts client.ts cache.ts model.ts types.ts hooks.ts logger.ts migrations.ts auto-migrate.ts utils/encryption.ts --outdir dist --target bun --sourcemap=external --minify",
+    "build:types": "bun tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run build",
+    "typecheck": "bun tsc --noEmit",
+    "test": "bun test",
+    "format": "bunx prettier --write .",
+    "clean": "rm -rf dist",
+    "release": "bun run build && npm publish"
   },
   "keywords": [
     "orm",
@@ -15,25 +76,43 @@
     "sqlite",
     "mysql",
     "postgresql",
+    "postgres",
     "redis",
     "typescript",
-    "database"
+    "database",
+    "query-builder",
+    "migration",
+    "soft-delete",
+    "optimistic-locking",
+    "pagination",
+    "cursor-pagination",
+    "seeding",
+    "transactions",
+    "hooks",
+    "cache",
+    "type-safe",
+    "prisma",
+    "typeorm",
+    "knex"
   ],
   "author": "ElectronSz <lwazicd@icloud.com>",
   "license": "MIT",
   "dependencies": {
-    "@types/pg": "^8.15.5",
-    "@types/uuid": "^11.0.0",
-    "commander": "^12.1.0",
-    "figlet": "^1.9.3",
-    "glob": "^11.0.3",
     "ioredis": "^5.8.1",
     "mysql2": "^3.15.2",
-    "pg": "^8.16.3",
-    "reflect-metadata": "^0.2.2",
-    "uuid": "^13.0.0"
+    "pg": "^8.16.3"
+  },
+  "peerDependencies": {
+    "bun": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "bun": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@types/pg": "^8.15.5",
+    "@types/uuid": "^11.0.0",
     "@typescript-eslint/eslint-plugin": "^8.46.1",
     "@typescript-eslint/parser": "^8.46.1",
     "@vitest/coverage-v8": "^2.1.9",
@@ -51,9 +130,8 @@
   },
   "homepage": "https://github.com/ElectronSz/stabilize-orm#readme",
   "engines": {
+    "node": ">=18.0.0",
     "bun": ">=1.0.0"
   },
-  "peerDependencies": {
-    "bun": "^1.3.0"
-  }
+  "sideEffects": false
 }

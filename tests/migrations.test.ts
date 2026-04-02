@@ -85,7 +85,6 @@ describe('generateMigration', () => {
       'Model not defined with tableName'
     );
   });
-});
 
 describe('runMigrations', () => {
   beforeEach(() => {

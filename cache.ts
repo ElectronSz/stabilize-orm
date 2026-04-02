@@ -27,7 +27,10 @@ export class Cache {
    * @param logger A logger instance for logging messages.
    */
   constructor(config: CacheConfig, logger: Logger = new StabilizeLogger()) {
-    this.config = config;
+    this.config = {
+      ...config,
+      cachePrefix: config.cachePrefix || "",
+    };
     this.logger = logger;
 
     if (this.config.enabled && this.config.redisUrl) {
@@ -90,7 +93,12 @@ export class Cache {
 
     try {
       const effectiveTtl = ttl ?? this.config.ttl;
-      await this.redis.set(this.config.cachePrefix + key, JSON.stringify(value), "EX", effectiveTtl);
+      await this.redis.set(
+        this.config.cachePrefix + key,
+        JSON.stringify(value),
+        "EX",
+        effectiveTtl,
+      );
       this.logger.logDebug(`Cache set for key: ${key}`);
     } catch (error) {
       this.logger.logError(error as Error);
@@ -141,7 +149,9 @@ export class Cache {
           pipeline.del(key);
         }
         await pipeline.exec();
-        this.logger.logDebug(`Cache invalidated for pattern: ${pattern} (${keys.length} keys)`);
+        this.logger.logDebug(
+          `Cache invalidated for pattern: ${pattern} (${keys.length} keys)`,
+        );
       }
     } catch (error) {
       this.logger.logError(error as Error);

@@ -7,7 +7,13 @@
 
 import { DBClient } from "./client";
 import { MetadataStorage } from "./model";
-import { type DBConfig, type Migration, StabilizeError, DBType, DataTypes } from "./types";
+import {
+  type DBConfig,
+  type Migration,
+  StabilizeError,
+  DBType,
+  DataTypes,
+} from "./types";
 
 /**
  * @internal
@@ -40,56 +46,98 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
 
   if (dbType === DBType.Postgres) {
     switch (type) {
-      case "string": return "TEXT";
-      case "text": return "TEXT";
-      case "integer": return "INTEGER";
-      case "bigint": return "BIGINT";
-      case "float": return "REAL";
-      case "double": return "DOUBLE PRECISION";
-      case "decimal": return "DECIMAL";
-      case "boolean": return "BOOLEAN";
-      case "date": return "DATE";
-      case "datetime": return "TIMESTAMP";
-      case "json": return "JSONB";
-      case "uuid": return "UUID";
-      case "blob": return "BYTEA";
-      default: return "TEXT";
+      case "string":
+        return "TEXT";
+      case "text":
+        return "TEXT";
+      case "integer":
+        return "INTEGER";
+      case "bigint":
+        return "BIGINT";
+      case "float":
+        return "REAL";
+      case "double":
+        return "DOUBLE PRECISION";
+      case "decimal":
+        return "DECIMAL";
+      case "boolean":
+        return "BOOLEAN";
+      case "date":
+        return "DATE";
+      case "datetime":
+        return "TIMESTAMP";
+      case "json":
+        return "JSONB";
+      case "uuid":
+        return "UUID";
+      case "blob":
+        return "BYTEA";
+      default:
+        return "TEXT";
     }
   }
   if (dbType === DBType.MySQL) {
     switch (type) {
-      case "string": return "VARCHAR(255)";
-      case "text": return "TEXT";
-      case "integer": return "INT";
-      case "bigint": return "BIGINT";
-      case "float": return "FLOAT";
-      case "double": return "DOUBLE";
-      case "decimal": return "DECIMAL(10,2)";
-      case "boolean": return "TINYINT(1)";
-      case "date": return "DATE";
-      case "datetime": return "DATETIME";
-      case "json": return "JSON";
-      case "uuid": return "CHAR(36)";
-      case "blob": return "BLOB";
-      default: return "TEXT";
+      case "string":
+        return "VARCHAR(255)";
+      case "text":
+        return "TEXT";
+      case "integer":
+        return "INT";
+      case "bigint":
+        return "BIGINT";
+      case "float":
+        return "FLOAT";
+      case "double":
+        return "DOUBLE";
+      case "decimal":
+        return "DECIMAL(10,2)";
+      case "boolean":
+        return "TINYINT(1)";
+      case "date":
+        return "DATE";
+      case "datetime":
+        return "DATETIME";
+      case "json":
+        return "JSON";
+      case "uuid":
+        return "CHAR(36)";
+      case "blob":
+        return "BLOB";
+      default:
+        return "TEXT";
     }
   }
   if (dbType === DBType.SQLite) {
     switch (type) {
-      case "string": return "TEXT";
-      case "text": return "TEXT";
-      case "integer": return "INTEGER";
-      case "bigint": return "INTEGER";
-      case "float": return "REAL";
-      case "double": return "REAL";
-      case "decimal": return "NUMERIC";
-      case "boolean": return "INTEGER";
-      case "date": return "TEXT";
-      case "datetime": return "TEXT";
-      case "json": return "TEXT";
-      case "uuid": return "TEXT";
-      case "blob": return "BLOB";
-      default: return "TEXT";
+      case "string":
+        return "TEXT";
+      case "text":
+        return "TEXT";
+      case "integer":
+        return "INTEGER";
+      case "bigint":
+        return "INTEGER";
+      case "float":
+        return "REAL";
+      case "double":
+        return "REAL";
+      case "decimal":
+        return "NUMERIC";
+      case "boolean":
+        return "INTEGER";
+      case "date":
+        return "TEXT";
+      case "datetime":
+        return "TEXT";
+      case "json":
+        return "TEXT";
+      case "uuid":
+        return "TEXT";
+      case "blob":
+        return "BLOB";
+      default:
+        return "TEXT";
     }
   }
   return "TEXT";
@@ -127,7 +175,10 @@ export async function generateMigration(
 ): Promise<Migration> {
   const tableName = MetadataStorage.getTableName(model);
   if (!tableName) {
-    throw new StabilizeError("Model not defined with tableName", "MIGRATION_ERROR");
+    throw new StabilizeError(
+      "Model not defined with tableName",
+      "MIGRATION_ERROR",
+    );
   }
 
   const columns = MetadataStorage.getColumns(model);
@@ -140,25 +191,27 @@ export async function generateMigration(
   for (const [key, col] of Object.entries(columns)) {
     const defParts: string[] = [];
 
-    if (col.name === "id") {
+    if (key === "id") {
       defParts.push("id");
       defParts.push(getAutoIncrementPK(dbType));
     } else {
       defParts.push(col.name || key);
       defParts.push(mapDataTypeToSql(col.type, dbType));
-    }
 
-    if (validators[key]?.includes("required")) {
-      defParts.push("NOT NULL");
-    }
-    if (validators[key]?.includes("unique")) {
-      defParts.push("UNIQUE");
-    }
-    if (col.defaultValue !== undefined) {
-      defParts.push(`DEFAULT ${JSON.stringify(col.defaultValue)}`);
-    }
-    if (col.index) {
-      defParts.push(`INDEX ${col.index}`);
+      if (validators[key]?.includes("required")) {
+        defParts.push("NOT NULL");
+      }
+      if (validators[key]?.includes("unique")) {
+        defParts.push("UNIQUE");
+      }
+      if (col.defaultValue !== undefined) {
+        defParts.push(`DEFAULT ${JSON.stringify(col.defaultValue)}`);
+      } else if (col.defaultExpression) {
+        defParts.push(`DEFAULT ${col.defaultExpression.sql}`);
+      }
+      if (col.index) {
+        defParts.push(`INDEX ${col.index}`);
+      }
     }
 
     columnDefs.push(defParts.join(" "));
@@ -186,11 +239,17 @@ export async function generateMigration(
     }
   }
 
-  const up: string[] = [`CREATE TABLE IF NOT EXISTS ${tableName} (${columnDefs.join(", ")})`];
+  const up: string[] = [
+    `CREATE TABLE IF NOT EXISTS ${tableName} (${columnDefs.join(", ")})`,
+  ];
   const down: string[] = [`DROP TABLE IF EXISTS ${tableName}`];
 
   if (versioned) {
-    const [historyUp, historyDown] = generateHistoryMigration(tableName, columnDefs, dbType);
+    const [historyUp, historyDown] = generateHistoryMigration(
+      tableName,
+      columnDefs,
+      dbType,
+    );
     up.push(historyUp);
     down.push(historyDown);
   }
@@ -212,16 +271,19 @@ function generateHistoryMigration(
   const historyTable = `${tableName}_history`;
   let opType = "VARCHAR(10) NOT NULL";
   let versionType = "INT NOT NULL";
-  let tsType = dbType === DBType.MySQL ? "DATETIME" :
-    dbType === DBType.SQLite ? "TEXT" : "TIMESTAMP";
+  let tsType =
+    dbType === DBType.MySQL
+      ? "DATETIME"
+      : dbType === DBType.SQLite
+        ? "TEXT"
+        : "TIMESTAMP";
   let modByType = dbType === DBType.MySQL ? "VARCHAR(255)" : "TEXT";
-  let modAtType = tsType + (dbType === DBType.Postgres ? " DEFAULT CURRENT_TIMESTAMP" : "");
+  let modAtType =
+    tsType + (dbType === DBType.Postgres ? " DEFAULT CURRENT_TIMESTAMP" : "");
 
   // Strip constraints for history columns
   function cleanColumnDef(def: string): string {
-    return def
-      .replace(/\s+PRIMARY\s+KEY\b/gi, "")
-      .replace(/\s+UNIQUE\b/gi, "");
+    return def.replace(/\s+PRIMARY\s+KEY\b/gi, "").replace(/\s+UNIQUE\b/gi, "");
   }
 
   const historyColumns = [
@@ -231,11 +293,11 @@ function generateHistoryMigration(
     `valid_from ${tsType} NOT NULL`,
     `valid_to ${tsType}`,
     `modified_by ${modByType}`,
-    `modified_at ${modAtType}`
+    `modified_at ${modAtType}`,
   ];
   return [
     `CREATE TABLE IF NOT EXISTS ${historyTable} (${historyColumns.join(", ")})`,
-    `DROP TABLE IF EXISTS ${historyTable}`
+    `DROP TABLE IF EXISTS ${historyTable}`,
   ];
 }
 
@@ -281,9 +343,13 @@ export async function runMigrations(config: DBConfig, migrations: Migration[]) {
     await client.query(getMigrationsTableSQL(dbType));
 
     for (const [index, migration] of migrations.entries()) {
-      const name = migration.name || `migration_${index}_${new Date().getTime()}`;
+      const name =
+        migration.name || `migration_${index}_${new Date().getTime()}`;
 
-      const selectQuery = formatQuery(`SELECT id FROM stabilize_migrations WHERE name = ?`, dbType);
+      const selectQuery = formatQuery(
+        `SELECT id FROM stabilize_migrations WHERE name = ?`,
+        dbType,
+      );
       const applied = await client.query<{ id: number }>(selectQuery, [name]);
 
       if (applied.length === 0) {
@@ -293,7 +359,10 @@ export async function runMigrations(config: DBConfig, migrations: Migration[]) {
             await txClient.query(query);
           }
 
-          const insertQuery = formatQuery(`INSERT INTO stabilize_migrations (name, applied_at) VALUES (?, ?)`, dbType);
+          const insertQuery = formatQuery(
+            `INSERT INTO stabilize_migrations (name, applied_at) VALUES (?, ?)`,
+            dbType,
+          );
           let appliedAt: string;
           if (dbType === DBType.MySQL) {
             appliedAt = new Date().toISOString().slice(0, 19).replace("T", " ");

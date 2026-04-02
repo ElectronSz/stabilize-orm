@@ -1,0 +1,39 @@
+# Source
+*.ts
+!dist/**/*.ts
+!dist/**/*.d.ts
+!dist/**/*.d.ts.map
+dist/**/*.map
+# Tests
+tests/
+*.test.ts
+*.spec.ts
+
+# Docs project
+stabilize-docs/
+
+# CLI (separate package)
+stabilize-cli/
+
+# Dev config
+.kilo/
+.vscode/
+.idea/
+.github/
+
+# Build artifacts
+.sourcemap
+*.map
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+SUPPORT.md
+FUNDING.md
+LICENSE.md
