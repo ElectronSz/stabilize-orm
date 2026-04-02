@@ -34,6 +34,7 @@ describe("generateMigration", () => {
     expect(migration.up[0]).toBe(
       "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name TEXT NOT NULL UNIQUE, created_at TEXT)",
     );
+    expect(migration.name).toBe('create_users');
   });
 
   it("should generate PostgreSQL-specific primary key (SERIAL)", async () => {

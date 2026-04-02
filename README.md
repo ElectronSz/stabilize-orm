@@ -103,7 +103,7 @@ npm install stabilize-orm
 ## 📃 Documentation & Community
 
 - [Changelog](./CHANGELOG.md)
-- [License](./LICENSE.md)
+- [License](./LICENSE)
 - [Code of Conduct](./CODE_OF_CONDUCT.md)
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Security Policy](./SECURITY.md)
@@ -213,11 +213,11 @@ export { User };
 
 ## 🔍 Pagination
 
-The built-in pagination helper makes it easy to retrieve paged results and total counts in a single call.
+The built-in pagination helper makes it easy to retrieve a page of rows using LIMIT/OFFSET semantics.
 
 ```typescript
-const page = await userRepository.paginate(2, 10);
-// page = { data: [...], total: N, page: 2, pageSize: 10 }
+const users = await userRepository.find().paginate(2, 10).execute(dbClient);
+// users = [...] // Returns an array of rows for that page
 ```
 
 Or, use the query builder:
