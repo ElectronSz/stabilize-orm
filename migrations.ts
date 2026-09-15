@@ -16,6 +16,41 @@ import {
 } from "./types";
 
 /**
+ * Quotes an identifier for the target dialect.
+ *
+ * `"x"` is an identifier only where the dialect's grammar says so. MySQL and
+ * MariaDB read it as a *string literal* unless the server runs with
+ * `ANSI_QUOTES` in `sql_mode` — off by default — so `CREATE TABLE "users" (…)`
+ * is a syntax error there and backticks are the spelling that always parses.
+ * Postgres and SQLite quote with `"`, and T-SQL accepts it too under
+ * `QUOTED_IDENTIFIER ON`, which is the default, so those three keep it.
+ *
+ * @param name The bare identifier.
+ * @param dbType The target database dialect.
+ * @returns The identifier wrapped for the dialect.
+ */
+export function quoteIdentifier(name: string, dbType: DBType): string {
+  return dbType === DBType.MySQL ? `\`${name}\`` : `"${name}"`;
+}
+
+/**
+ * @internal
+ * Recovers the bare name from an identifier quoted for any dialect.
+ *
+ * SQL Server's catalogue functions take an unquoted name, so the quoting
+ * {@link quoteIdentifier} added has to come back off before one is built.
+ * Both spellings are stripped rather than just the one the current dialect
+ * uses, so a caller passing an already-quoted identifier gets the right answer
+ * whichever dialect produced it.
+ *
+ * @param name The quoted identifier.
+ * @returns The bare name.
+ */
+function unquoteIdentifier(name: string): string {
+  return name.replace(/^[`"]/, "").replace(/[`"]$/, "");
+}
+
+/**
  * @internal
  * Formats a SQL query with placeholders for the target database dialect.
  * @param query The SQL query string with '?' placeholders.
@@ -28,6 +63,77 @@ function formatQuery(query: string, dbType: DBType): string {
     return query.replace(/\?/g, () => `$${paramIndex++}`);
   }
   return query;
+}
+
+/**
+ * Builds a `CREATE TABLE` that is a no-op when the table already exists.
+ *
+ * SQLite, MySQL and PostgreSQL spell this `CREATE TABLE IF NOT EXISTS`. T-SQL
+ * has no such clause and rejects the statement outright, so SQL Server gets the
+ * equivalent written as a leading existence check on the same batch instead.
+ *
+ * @param table The table identifier, already quoted for the dialect if needed.
+ * @param body The column definitions, without the surrounding parentheses.
+ * @param dbType The target database dialect.
+ * @returns The complete statement.
+ */
+export function createTableIfNotExistsSQL(
+  table: string,
+  body: string,
+  dbType: DBType,
+): string {
+  if (dbType !== DBType.MSSQL) {
+    return `CREATE TABLE IF NOT EXISTS ${table} (${body})`;
+  }
+  // `OBJECT_ID` takes the bare name, not the quoted identifier, and the `N'…'`
+  // prefix keeps it Unicode so a non-ASCII table name still resolves.
+  const bare = unquoteIdentifier(table).replace(/'/g, "''");
+  return `IF OBJECT_ID(N'${bare}', N'U') IS NULL CREATE TABLE ${table} (${body})`;
+}
+
+/**
+ * Builds a `CREATE INDEX` that is a no-op when the index already exists.
+ *
+ * Only Postgres and SQLite support the clause itself. As with
+ * {@link createTableIfNotExistsSQL}, SQL Server has no `IF NOT EXISTS` clause
+ * to hang on the statement, so the check is a separate one against
+ * `sys.indexes` on the same batch. MySQL and MariaDB have neither the clause
+ * nor an inline substitute, so for them the caller does the checking — see the
+ * `DBType.MySQL` branch below.
+ *
+ * @param index The index identifier, already quoted for the dialect if needed.
+ * @param table The table identifier, already quoted for the dialect if needed.
+ * @param columns The indexed column identifiers, already quoted.
+ * @param unique Whether the index enforces uniqueness.
+ * @param dbType The target database dialect.
+ * @returns The complete statement.
+ */
+export function createIndexIfNotExistsSQL(
+  index: string,
+  table: string,
+  columns: string[],
+  unique: boolean,
+  dbType: DBType,
+): string {
+  const kind = unique ? "UNIQUE INDEX" : "INDEX";
+  const statement = `CREATE ${kind} ${index} ON ${table} (${columns.join(", ")})`;
+  if (dbType === DBType.MySQL) {
+    // MySQL and MariaDB have no `IF NOT EXISTS` clause on `CREATE INDEX` — the
+    // server rejects it as a syntax error however the identifiers are quoted —
+    // so the statement is issued plain, and the guarantee has to come from
+    // whoever calls this. `autoMigrate` is the only caller and satisfies it
+    // already: it reads the table's indexes from `information_schema` (via
+    // `SHOW INDEX`) and skips any name it finds, which is the pre-check, done
+    // once for every index rather than once per statement. Nothing else may
+    // call this for a MySQL target without doing the same.
+    return statement;
+  }
+  if (dbType !== DBType.MSSQL) {
+    return `CREATE ${kind} IF NOT EXISTS ${index} ON ${table} (${columns.join(", ")})`;
+  }
+  const bareIndex = unquoteIdentifier(index).replace(/'/g, "''");
+  const bareTable = unquoteIdentifier(table).replace(/'/g, "''");
+  return `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'${bareIndex}' AND object_id = OBJECT_ID(N'${bareTable}')) ${statement}`;
 }
 
 /**
@@ -108,6 +214,38 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
         return "TEXT";
     }
   }
+  if (dbType === DBType.MSSQL) {
+    switch (type) {
+      case "string":
+        return "NVARCHAR(255)";
+      case "text":
+        return "NVARCHAR(MAX)";
+      case "integer":
+        return "INT";
+      case "bigint":
+        return "BIGINT";
+      case "float":
+        return "REAL";
+      case "double":
+        return "FLOAT";
+      case "decimal":
+        return "DECIMAL(10,2)";
+      case "boolean":
+        return "BIT";
+      case "date":
+        return "DATE";
+      case "datetime":
+        return "DATETIME2";
+      case "json":
+        return "NVARCHAR(MAX)";
+      case "uuid":
+        return "UNIQUEIDENTIFIER";
+      case "blob":
+        return "VARBINARY(MAX)";
+      default:
+        return "NVARCHAR(MAX)";
+    }
+  }
   if (dbType === DBType.SQLite) {
     switch (type) {
       case "string":
@@ -155,6 +293,8 @@ function getAutoIncrementPK(dbType: DBType): string {
       return "SERIAL PRIMARY KEY";
     case DBType.MySQL:
       return "INT AUTO_INCREMENT PRIMARY KEY";
+    case DBType.MSSQL:
+      return "INT IDENTITY(1,1) PRIMARY KEY";
     case DBType.SQLite:
     default:
       return "INTEGER PRIMARY KEY AUTOINCREMENT";
@@ -193,7 +333,28 @@ export async function generateMigration(
 
     if (key === "id") {
       defParts.push("id");
-      defParts.push(getAutoIncrementPK(dbType));
+      // `type` is typed as the DataTypes enum but may arrive as a literal
+      // string when the model came from another copy of the ORM.
+      const idTypeRaw: any = col.type;
+      const idTypeStr =
+        typeof idTypeRaw === "string"
+          ? idTypeRaw.toLowerCase()
+          : (DataTypes as any)[idTypeRaw]?.toLowerCase();
+      if (idTypeStr === "string" || idTypeStr === "uuid") {
+        defParts.push(
+          dbType === DBType.Postgres
+            ? "UUID PRIMARY KEY"
+            : dbType === DBType.MySQL
+              ? "VARCHAR(255) PRIMARY KEY"
+              : dbType === DBType.MSSQL
+                ? idTypeStr === "uuid"
+                  ? "UNIQUEIDENTIFIER PRIMARY KEY"
+                  : "NVARCHAR(255) PRIMARY KEY"
+                : "TEXT PRIMARY KEY",
+        );
+      } else {
+        defParts.push(getAutoIncrementPK(dbType));
+      }
     } else {
       defParts.push(col.name || key);
       defParts.push(mapDataTypeToSql(col.type, dbType));
@@ -217,11 +378,23 @@ export async function generateMigration(
     columnDefs.push(defParts.join(" "));
   }
 
-  // Add timestamp columns if enabled
+  // Add timestamp columns if enabled. A model may declare them in `columns`
+  // as well as in `timestamps` — the documented pattern — so skip any column
+  // that is already in the table definition rather than emitting it twice
+  // (which makes the CREATE TABLE fail with "duplicate column name").
   if (timestamps) {
+    const declared = new Set(
+      Object.entries(columns).map(([key, col]) => col.name || key),
+    );
     for (const [field, colName] of Object.entries(timestamps)) {
+      if (!colName || declared.has(colName)) continue;
       // Use the field name defined in the timestamps config
-      let sqlType = dbType === DBType.Postgres ? "TIMESTAMP" : "DATETIME";
+      let sqlType =
+        dbType === DBType.Postgres
+          ? "TIMESTAMP"
+          : dbType === DBType.MSSQL
+            ? "DATETIME2"
+            : "DATETIME";
       let def = `${colName} ${sqlType} NOT NULL`;
 
       // Set default value for createdAt, and optionally for updatedAt
@@ -240,7 +413,7 @@ export async function generateMigration(
   }
 
   const up: string[] = [
-    `CREATE TABLE IF NOT EXISTS ${tableName} (${columnDefs.join(", ")})`,
+    createTableIfNotExistsSQL(tableName, columnDefs.join(", "), dbType),
   ];
   const down: string[] = [`DROP TABLE IF EXISTS ${tableName}`];
 
@@ -274,10 +447,17 @@ function generateHistoryMigration(
   let tsType =
     dbType === DBType.MySQL
       ? "DATETIME"
-      : dbType === DBType.SQLite
-        ? "TEXT"
-        : "TIMESTAMP";
-  let modByType = dbType === DBType.MySQL ? "VARCHAR(255)" : "TEXT";
+      : dbType === DBType.MSSQL
+        ? "DATETIME2"
+        : dbType === DBType.SQLite
+          ? "TEXT"
+          : "TIMESTAMP";
+  let modByType =
+    dbType === DBType.MySQL
+      ? "VARCHAR(255)"
+      : dbType === DBType.MSSQL
+        ? "NVARCHAR(255)"
+        : "TEXT";
   let modAtType =
     tsType + (dbType === DBType.Postgres ? " DEFAULT CURRENT_TIMESTAMP" : "");
 
@@ -296,7 +476,7 @@ function generateHistoryMigration(
     `modified_at ${modAtType}`,
   ];
   return [
-    `CREATE TABLE IF NOT EXISTS ${historyTable} (${historyColumns.join(", ")})`,
+    createTableIfNotExistsSQL(historyTable, historyColumns.join(", "), dbType),
     `DROP TABLE IF EXISTS ${historyTable}`,
   ];
 }
@@ -321,6 +501,14 @@ function getMigrationsTableSQL(dbType: DBType): string {
         name VARCHAR(255) UNIQUE NOT NULL,
         applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
       )`;
+    case DBType.MSSQL:
+      return createTableIfNotExistsSQL(
+        "stabilize_migrations",
+        `id INT IDENTITY(1,1) PRIMARY KEY,
+        name NVARCHAR(255) UNIQUE NOT NULL,
+        applied_at DATETIME2 NOT NULL DEFAULT CURRENT_TIMESTAMP`,
+        DBType.MSSQL,
+      );
     case DBType.SQLite:
     default:
       return `CREATE TABLE IF NOT EXISTS stabilize_migrations (
@@ -366,6 +554,11 @@ export async function runMigrations(config: DBConfig, migrations: Migration[]) {
           let appliedAt: string;
           if (dbType === DBType.MySQL) {
             appliedAt = new Date().toISOString().slice(0, 19).replace("T", " ");
+          } else if (dbType === DBType.MSSQL) {
+            // The trailing `Z` an ISO string carries is only meaningful for
+            // `datetimeoffset`; `datetime2` wants a space separator and no
+            // zone designator, which every server language parses the same way.
+            appliedAt = new Date().toISOString().slice(0, 23).replace("T", " ");
           } else {
             appliedAt = new Date().toISOString();
           }

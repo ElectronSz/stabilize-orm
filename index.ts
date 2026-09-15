@@ -50,6 +50,8 @@ export class Stabilize {
   private cache: Cache | null;
   private logger: Logger;
   public events: StabilizeEmitter;
+  /** Repositories handed out so far, keyed by model. @see getRepository */
+  private repositories = new Map<Function, Repository<any>>();
 
   constructor(
     config: DBConfig,
@@ -82,8 +84,22 @@ export class Stabilize {
    * ```
    */
   getRepository<T>(model: new (...args: any[]) => T): Repository<T> {
-    const cacheConfig = this.cache ? this.cache.config : undefined;
-    return new Repository(this.client, model, cacheConfig, this.logger);
+    // Memoised per model. Every Repository owns an optional cache handle, so
+    // building a new one on each call opened a second Redis connection that
+    // nothing disconnected and that `getCacheStats()` never saw — it reports on
+    // the ORM's own cache, which no repository was using.
+    const existing = this.repositories.get(model);
+    if (existing) return existing as Repository<T>;
+
+    const repository = new Repository(
+      this.client,
+      model,
+      this.cache?.config,
+      this.logger,
+      this.cache,
+    );
+    this.repositories.set(model, repository);
+    return repository;
   }
 
   /**
@@ -217,6 +233,20 @@ export class Stabilize {
         active: raw._allConnections.length,
         idle: raw._freeConnections?.length ?? 0,
         total: raw._allConnections.length,
+      };
+    }
+    // `Stabilize.client` is the DBClient wrapper, so the driver's pool is one
+    // level down. Only the SQL Server branch below reads through it; the two
+    // checks above are left reading `raw` exactly as they always have.
+    const pool = raw.client ?? raw;
+    if (
+      this.client.config.type === DBType.MSSQL &&
+      typeof pool?.size === "number"
+    ) {
+      return {
+        active: pool.borrowed ?? 0,
+        idle: pool.available ?? 0,
+        total: pool.size ?? 0,
       };
     }
     return { active: -1, idle: -1, total: -1 };

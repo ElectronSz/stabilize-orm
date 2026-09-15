@@ -7,7 +7,7 @@
 import { DBClient } from "./client";
 import { Cache } from "./cache";
 import { MetadataStorage } from "./model";
-import { StabilizeError } from "./types";
+import { DBType, StabilizeError } from "./types";
 
 type JoinType = "INNER" | "LEFT" | "RIGHT" | "FULL" | "CROSS";
 type LockMode =
@@ -16,10 +16,75 @@ type LockMode =
   | "FOR NO KEY UPDATE"
   | "FOR KEY SHARE";
 
+/**
+ * Builds the clause that limits how many rows a statement returns.
+ *
+ * SQLite, MySQL and PostgreSQL all spell this `LIMIT … OFFSET …`, and the three
+ * are emitted here exactly as they always were. T-SQL has no `LIMIT`: it needs
+ * `OFFSET … ROWS FETCH NEXT … ROWS ONLY`, and both of those clauses are legal
+ * only on a statement that has an `ORDER BY`. A statement with no ordering is
+ * therefore given `ORDER BY (SELECT NULL)` — a constant ordering, which leaves
+ * the row order undefined exactly as an unordered `LIMIT` did — purely to
+ * satisfy that requirement.
+ *
+ * Pure, and exported, so every case can be asserted without a server.
+ *
+ * @param limit The `LIMIT` value, or null when none was set.
+ * @param offset The `OFFSET` value, or null when none was set.
+ * @param hasOrderBy Whether the statement already carries an `ORDER BY`.
+ * @param dbType The target database dialect. Defaults to the LIMIT dialects.
+ * @returns The clause to append, or an empty string when neither was set.
+ */
+export function buildLimitClause(
+  limit: number | null,
+  offset: number | null,
+  hasOrderBy: boolean,
+  dbType?: DBType,
+): string {
+  if (limit === null && offset === null) return "";
+
+  if (dbType === DBType.MSSQL) {
+    const orderBy = hasOrderBy ? "" : "\nORDER BY (SELECT NULL)";
+    if (offset === null) {
+      // `FETCH NEXT` cannot appear without an `OFFSET`, so a bare limit skips
+      // no rows rather than being translated into a different clause.
+      return `${orderBy}\nOFFSET 0 ROWS FETCH NEXT ${limit} ROWS ONLY`;
+    }
+    const offsetClause = `\nOFFSET ${offset} ROWS`;
+    return limit === null
+      ? `${orderBy}${offsetClause}`
+      : `${orderBy}${offsetClause} FETCH NEXT ${limit} ROWS ONLY`;
+  }
+
+  let clause = "";
+  if (limit !== null) {
+    clause += `\nLIMIT ${limit}`;
+  }
+  if (offset !== null) {
+    // SQLite and MySQL reject a bare OFFSET; every dialect accepts an
+    // explicitly large LIMIT, so supply one when no limit was set.
+    if (limit === null) {
+      clause += "\nLIMIT 9223372036854775807";
+    }
+    clause += ` OFFSET ${offset}`;
+  }
+  return clause;
+}
+
 export class QueryBuilder<T> {
   private table: string;
+  /**
+   * The dialect row limiting is spelled for.
+   *
+   * Left unset until a client is known — `execute` and its siblings set it from
+   * the client they are handed — so a builder that is only ever rendered
+   * without one keeps emitting the `LIMIT` form the three row-limiting dialects
+   * share.
+   */
+  private dialect: DBType | null = null;
   private tableAlias: string | null = null;
   private selectFields: string[] = ["*"];
+  private selectParams: any[] = [];
   private isDistinct = false;
   private joins: string[] = [];
   private whereConditions: string[] = [];
@@ -32,6 +97,24 @@ export class QueryBuilder<T> {
   private havingParams: any[] = [];
   private lockMode: LockMode | null = null;
   private eagerRelations: string[] = [];
+  /**
+   * Per-row post-processing applied to every result set this builder returns.
+   * The repository uses it to decrypt encrypted columns, so the transform has
+   * to run on all read paths rather than on a single hand-picked one.
+   */
+  public rowTransform: ((rows: any[]) => any[]) | null = null;
+  /**
+   * Eager-loads {@link eagerRelations} onto a result set.
+   *
+   * Supplied by the repository, which owns the model metadata and the database
+   * access that loading a relation needs. Running it here — rather than in one
+   * repository method — means every builder a caller can reach honours
+   * `withRelations()`, and it runs before the result is cached so a cache hit
+   * carries the relations too.
+   */
+  public relationLoader:
+    | ((rows: any[], relations: string[], client: DBClient) => Promise<any[]>)
+    | null = null;
   private unions: { query: string; params: any[]; all: boolean }[] = [];
   private ctas: {
     name: string;
@@ -53,12 +136,29 @@ export class QueryBuilder<T> {
 
   selectRaw(expression: string, ...params: any[]): QueryBuilder<T> {
     this.selectFields.push(expression);
-    this.whereParams.push(...params);
+    // Kept separate from `whereParams`: the SELECT list is emitted before the
+    // WHERE clause, so sharing one array would bind the values out of order.
+    this.selectParams.push(...params);
     return this;
   }
 
   distinct(): QueryBuilder<T> {
     this.isDistinct = true;
+    return this;
+  }
+
+  /**
+   * Declares the dialect this builder renders for, so dialect-specific clauses
+   * (today, only the row limit) are spelled correctly.
+   *
+   * `execute` sets this from the client it is given, so an ordinary
+   * `… .execute(db.client)` needs nothing. It is public for the cases where a
+   * builder is rendered without a client, and for a nested builder — one passed
+   * to `union` or `whereExists`, say — which is rendered before the outer
+   * builder ever sees a client.
+   */
+  withDialect(dialect: DBType): QueryBuilder<T> {
+    this.dialect = dialect;
     return this;
   }
 
@@ -110,7 +210,14 @@ export class QueryBuilder<T> {
     if (this.whereConditions.length === 0) {
       this.whereConditions.push(condition);
     } else {
-      this.whereConditions.push(`OR (${condition})`);
+      // Fold the conditions so far and this OR branch into a single group, so
+      // a later `where()` constrains the whole disjunction:
+      //   (A OR B) AND C   rather than   A OR (B AND C)
+      // Without the group, SQL's AND precedence would drop the later filters
+      // from the first branch — including the soft-delete predicate.
+      this.whereConditions = [
+        `(${this.whereConditions.join(" ")} OR (${condition}))`,
+      ];
     }
     this.whereParams.push(...params);
     return this;
@@ -259,7 +366,11 @@ export class QueryBuilder<T> {
 
   /** Knex-style column-to-column comparison: .whereRef('orders.user_id', '=', 'users.id') */
   whereRef(leftCol: string, op: string, rightCol: string): QueryBuilder<T> {
-    this.whereConditions.push(`${leftCol} ${op} ${rightCol}`);
+    if (this.whereConditions.length > 0) {
+      this.whereConditions.push(`AND ${leftCol} ${op} ${rightCol}`);
+    } else {
+      this.whereConditions.push(`${leftCol} ${op} ${rightCol}`);
+    }
     return this;
   }
 
@@ -302,7 +413,32 @@ export class QueryBuilder<T> {
   // ─── ORDER BY ─────────────────────────────────────────────────────
 
   orderBy(column: string, direction: "ASC" | "DESC" = "ASC"): QueryBuilder<T> {
-    this.orderByClauses.push(`${column} ${direction}`);
+    // Also accept the documented single-argument form, orderBy("createdAt DESC"),
+    // which would otherwise emit "ORDER BY createdAt DESC ASC".
+    const clause = column.trim();
+    this.orderByClauses.push(
+      / (ASC|DESC)$/i.test(clause) ? clause : `${clause} ${direction}`,
+    );
+    return this;
+  }
+
+  /**
+   * Orders by an arbitrary SQL expression.
+   *
+   * `orderBy` only accepts a column name; an expression such as
+   * `CASE WHEN status = 'urgent' THEN 0 ELSE 1 END` has no column to name, and
+   * passing it to `orderBy` would have the direction appended to it.
+   *
+   * @param expression The SQL to order by, e.g. `"LENGTH(name)"`.
+   * @param direction Optional sort direction appended to the expression.
+   * @example
+   * ```
+   * repo.find().orderByRaw("CASE WHEN status = 'urgent' THEN 0 ELSE 1 END")
+   * ```
+   */
+  orderByRaw(expression: string, direction?: "ASC" | "DESC"): QueryBuilder<T> {
+    const clause = direction ? `${expression} ${direction}` : expression;
+    this.orderByClauses.push(clause);
     return this;
   }
 
@@ -313,10 +449,42 @@ export class QueryBuilder<T> {
     return this;
   }
 
+  /**
+   * Groups by an arbitrary SQL expression rather than a column name.
+   * @param expression The SQL to group by, e.g. `"strftime('%Y', createdAt)"`.
+   * @example
+   * ```
+   * repo.find().groupByRaw("strftime('%Y-%m', createdAt)")
+   * ```
+   */
+  groupByRaw(expression: string): QueryBuilder<T> {
+    this.groupByClauses.push(expression);
+    return this;
+  }
+
   having(condition: string, ...params: any[]): QueryBuilder<T> {
-    this.havingConditions.push(condition);
+    if (this.havingConditions.length > 0) {
+      this.havingConditions.push(`AND ${condition}`);
+    } else {
+      this.havingConditions.push(condition);
+    }
     this.havingParams.push(...params);
     return this;
+  }
+
+  /**
+   * Adds a `HAVING` fragment that references an aggregate by its alias or
+   * position, which `having` cannot express without repeating the aggregate.
+   *
+   * Identical to `having` today; it exists so a caller reading `having("COUNT(*)
+   * > ?")` alongside `selectRaw` has the raw form spelled the same way as
+   * `whereRaw`, `orderByRaw` and `groupByRaw`.
+   *
+   * @param condition The raw SQL condition.
+   * @param params Values bound to its placeholders.
+   */
+  havingRaw(condition: string, ...params: any[]): QueryBuilder<T> {
+    return this.having(condition, ...params);
   }
 
   // ─── LIMIT / OFFSET (Prisma: take / skip) ─────────────────────────
@@ -409,6 +577,44 @@ export class QueryBuilder<T> {
     return this;
   }
 
+  // ─── EAGER RELATIONS ──────────────────────────────────────────────
+
+  /**
+   * Eager-loads relations onto the result, as `findOne(id, { relations })`
+   * does.
+   *
+   * Nested paths use dot notation (`"roles.permissions"`). The builder records
+   * the paths and the repository loads them when `execute()` runs, so this
+   * composes with `where`, `limit` and `paginate`, and the loaded rows are
+   * cached with their relations.
+   *
+   * @param relations One or more relation paths.
+   * @example
+   * ```
+   * const user = await userRepository
+   *   .find()
+   *   .where("isActive = ?", true)
+   *   .withRelations("roles", "roles.permissions")
+   *   .execute(db.client);
+   * ```
+   */
+  withRelations(...relations: (string | string[])[]): QueryBuilder<T> {
+    for (const relation of relations.flat()) {
+      const path = relation?.trim();
+      // A repeated path would load the same relation twice and overwrite the
+      // first result with an identical one.
+      if (path && !this.eagerRelations.includes(path)) {
+        this.eagerRelations.push(path);
+      }
+    }
+    return this;
+  }
+
+  /** The relation paths requested via {@link withRelations}. */
+  getRelations(): string[] {
+    return [...this.eagerRelations];
+  }
+
   // ─── SCOPE ────────────────────────────────────────────────────────
 
   scope(name: string, ...args: any[]): QueryBuilder<T> {
@@ -433,16 +639,20 @@ export class QueryBuilder<T> {
     q.selectFields = [...this.selectFields];
     q.isDistinct = this.isDistinct;
     q.joins = [...this.joins];
+    q.selectParams = [...this.selectParams];
     q.whereConditions = [...this.whereConditions];
     q.whereParams = [...this.whereParams];
     q.orderByClauses = [...this.orderByClauses];
     q.limitValue = this.limitValue;
     q.offsetValue = this.offsetValue;
+    q.dialect = this.dialect;
     q.groupByClauses = [...this.groupByClauses];
     q.havingConditions = [...this.havingConditions];
     q.havingParams = [...this.havingParams];
     q.lockMode = this.lockMode;
     q.eagerRelations = [...this.eagerRelations];
+    q.rowTransform = this.rowTransform;
+    q.relationLoader = this.relationLoader;
     q.unions = [...this.unions];
     q.ctas = [...this.ctas];
     return q;
@@ -450,7 +660,14 @@ export class QueryBuilder<T> {
 
   // ─── BUILD ────────────────────────────────────────────────────────
 
-  build(): { query: string; params: any[] } {
+  /**
+   * Renders the statement and the values bound to its placeholders.
+   *
+   * @param dialect Overrides the dialect this builder renders for. Optional, so
+   *   every existing call site renders exactly what it always did.
+   */
+  build(dialect?: DBType): { query: string; params: any[] } {
+    const renderedFor = dialect ?? this.dialect ?? undefined;
     const params: any[] = [];
     let ctePrefix = "";
 
@@ -469,6 +686,10 @@ export class QueryBuilder<T> {
       ? `${this.table} AS ${this.tableAlias}`
       : this.table;
     const distinct = this.isDistinct ? " DISTINCT" : "";
+
+    // The SELECT list is emitted before WHERE/GROUP BY/HAVING, so its params
+    // must be collected in that same order.
+    params.push(...this.selectParams);
 
     let query = `${ctePrefix}SELECT${distinct} ${this.selectFields.join(", ")} FROM ${table}`;
 
@@ -494,12 +715,12 @@ export class QueryBuilder<T> {
       query += "\nORDER BY " + this.orderByClauses.join(", ");
     }
 
-    if (this.limitValue !== null) {
-      query += `\nLIMIT ${this.limitValue}`;
-    }
-    if (this.offsetValue !== null) {
-      query += ` OFFSET ${this.offsetValue}`;
-    }
+    query += buildLimitClause(
+      this.limitValue,
+      this.offsetValue,
+      this.orderByClauses.length > 0,
+      renderedFor,
+    );
 
     if (this.lockMode) {
       query += ` ${this.lockMode}`;
@@ -513,8 +734,8 @@ export class QueryBuilder<T> {
     return { query, params };
   }
 
-  toSQL(): { query: string; params: any[] } {
-    return this.build();
+  toSQL(dialect?: DBType): { query: string; params: any[] } {
+    return this.build(dialect);
   }
 
   // ─── EXECUTE ──────────────────────────────────────────────────────
@@ -524,17 +745,36 @@ export class QueryBuilder<T> {
     cache?: Cache,
     cacheKey?: string,
   ): Promise<T[]> {
+    // Only the client knows which dialect this statement will be sent to, so
+    // the row-limiting clause is decided here rather than at build time.
+    this.dialect = client.config.type;
     const { query, params } = this.build();
 
-    if (cache && cacheKey) {
-      const cached = await cache.get<T[]>(cacheKey);
+    // Never cache a read taken inside an open transaction: the rows may be
+    // rolled back, and a cached copy would outlive the rollback.
+    const cacheable =
+      cache && cacheKey && !(client as any).isTransactionClient;
+
+    if (cacheable) {
+      const cached = await cache.get<T[]>(cacheKey!);
       if (cached) return cached;
     }
 
-    const results = await client.query<T>(query, params);
+    let results = await client.query<T>(query, params);
 
-    if (cache && cacheKey && results.length > 0) {
-      await cache.set(cacheKey, results, 60);
+    // Transform before caching, so a cached row has the same shape a fresh
+    // read would produce.
+    if (this.rowTransform) results = this.rowTransform(results);
+
+    // Relations are loaded after the transform and before the cache write, so
+    // a cached result carries them — caching the pre-hydration rows made every
+    // later hit return a row with no relations on it.
+    if (this.relationLoader && this.eagerRelations.length > 0) {
+      results = await this.relationLoader(results, this.eagerRelations, client);
+    }
+
+    if (cacheable && results.length > 0) {
+      await cache!.set(cacheKey!, results, cache!.config?.ttl ?? 60);
     }
 
     return results;
@@ -542,19 +782,39 @@ export class QueryBuilder<T> {
 
   async countExec(client: DBClient): Promise<number> {
     const clone = this.clone();
-    clone.selectFields = ["COUNT(*) AS __cnt"];
+    clone.dialect = client.config.type;
     clone.orderByClauses = [];
     clone.limitValue = null;
     clone.offsetValue = null;
-    const results = await client.query<any>(
-      clone.build().query,
-      clone.build().params,
-    );
+    // Aggregate/limit clauses are meaningless in a COUNT and `FOR UPDATE` is
+    // rejected alongside aggregates by Postgres.
+    clone.lockMode = null;
+
+    // GROUP BY/HAVING/UNION change what a row represents, so count the rows
+    // the query actually produces rather than the first group's count.
+    if (clone.groupByClauses.length > 0 || clone.unions.length > 0) {
+      const inner = clone.build();
+      const results = await client.query<any>(
+        `SELECT COUNT(*) AS __cnt FROM (${inner.query}) AS __cnt_sub`,
+        inner.params,
+      );
+      return Number(results[0]?.__cnt ?? 0);
+    }
+
+    // A join can multiply rows, so count distinct root rows.
+    clone.selectFields = [
+      clone.joins.length > 0
+        ? `COUNT(DISTINCT ${clone.tableAlias || clone.table}.id) AS __cnt`
+        : "COUNT(*) AS __cnt",
+    ];
+    const built = clone.build();
+    const results = await client.query<any>(built.query, built.params);
     return Number(results[0]?.__cnt ?? 0);
   }
 
   async existsExec(client: DBClient): Promise<boolean> {
     const clone = this.clone();
+    clone.dialect = client.config.type;
     clone.selectFields = ["1"];
     clone.orderByClauses = [];
     clone.limitValue = 1;

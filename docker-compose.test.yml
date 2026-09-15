@@ -1,0 +1,111 @@
+# Real-database test fleet for stabilize-orm.
+#
+#   docker compose -f docker-compose.test.yml up -d --wait
+#   bun test
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Host ports are deliberately non-standard so this never collides with a
+# database you already run locally. Everything lives on its own network and
+# every container is named `stabilize-test-*`, so `down` cannot touch anything
+# else you have running.
+#
+# SQLite needs no container — `bun:sqlite` is built into the runtime.
+
+name: stabilize-test
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: stabilize-test-postgres
+    environment:
+      POSTGRES_USER: stabilize
+      POSTGRES_PASSWORD: stabilize
+      POSTGRES_DB: stabilize_test
+    ports:
+      - "55432:5432"
+    healthcheck:
+      # -U matters: without it pg_isready checks the default user, not ours.
+      test: ["CMD-SHELL", "pg_isready -U stabilize -d stabilize_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      # Keeps the test database in RAM. These are throwaway fixtures, and it
+      # makes the suite noticeably faster than a bind mount on Windows.
+      #
+      # The mount point is `/var/lib/postgresql`, not the older
+      # `/var/lib/postgresql/data`: from 18 onward the image keeps the cluster
+      # in a versioned subdirectory so `pg_upgrade --link` can cross the mount
+      # boundary. Mounting the old path makes 18 refuse to boot, since it finds
+      # data sitting in an "unused mount/volume".
+      - /var/lib/postgresql
+    networks: [stabilize-test]
+
+  mysql:
+    image: mysql:8
+    container_name: stabilize-test-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: stabilize
+      MYSQL_DATABASE: stabilize_test
+      MYSQL_USER: stabilize
+      MYSQL_PASSWORD: stabilize
+    ports:
+      - "53306:3306"
+    healthcheck:
+      # -p is attached to the flag on purpose; a space would warn about the
+      # password being visible in the process list.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ustabilize", "-pstabilize"]
+      interval: 2s
+      timeout: 5s
+      retries: 40
+    tmpfs:
+      - /var/lib/mysql
+    networks: [stabilize-test]
+
+  mariadb:
+    image: mariadb:11
+    container_name: stabilize-test-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: stabilize
+      MARIADB_DATABASE: stabilize_test
+      MARIADB_USER: stabilize
+      MARIADB_PASSWORD: stabilize
+    ports:
+      - "53307:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 40
+    tmpfs:
+      - /var/lib/mysql
+    networks: [stabilize-test]
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: stabilize-test-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      # SQL Server enforces a complexity policy: 8+ chars with upper, lower,
+      # digit and symbol. A simpler password makes the container exit on boot.
+      MSSQL_SA_PASSWORD: "Stabilize!Test123"
+      MSSQL_PID: Developer
+    ports:
+      - "51433:1433"
+    healthcheck:
+      # The image ships no sqlcmd on PATH by default in 2022+, so readiness is
+      # probed over TCP rather than by querying. /dev/tcp is a bash builtin.
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/1433' || exit 1",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks: [stabilize-test]
+
+networks:
+  stabilize-test:
+    driver: bridge

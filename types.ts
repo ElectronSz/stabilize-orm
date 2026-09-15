@@ -8,6 +8,7 @@ export enum DBType {
   Postgres = "postgres",
   MySQL = "mysql",
   SQLite = "sqlite",
+  MSSQL = "mssql",
 }
 
 export enum LogLevel {
