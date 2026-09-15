@@ -221,7 +221,7 @@ export class Repository<T> {
           softDelete: col.softDelete,
           optimisticLock: col.optimisticLock,
         },
-      ]),
+      ])
     );
     this.relations = Object.fromEntries(
       Object.entries(MetadataStorage.getRelations(model)).map(([key, rel]) => [
