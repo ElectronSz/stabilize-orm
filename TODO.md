@@ -105,14 +105,20 @@ Committed as `acd07a8` and published. 616 tests pass / 0 fail across 33 files,
 
 ## Next
 
-- [ ] **Push the docs.** Both packages are on npm at 3.1.0, which was the
-      condition for pushing — the pages describe behaviour a reader installing
-      today now actually gets. The `stabilize-docs` tree holds two commits:
-      `3c9f5eb` (the sixteen files for the CLI and the
-      `length`/`precision`/`scale` work) and `5405cd1` (the hero release line
-      and the CLI pages moved to 3.1.0). `bunx tsc --noEmit` clean.
-- [x] **`stabilize-orm@3.1.0` published.** Verified on the registry. The
-      changes that can break a working project:
+- [x] **Push the docs.** Pushed as `895ca22..5405cd1` on `main`, which is what
+      Vercel deploys from. Two commits: `3c9f5eb` (the sixteen files for the CLI
+      and the `length`/`precision`/`scale` work) and `5405cd1` (the hero release
+      line and the CLI pages moved to 3.1.0). `bunx tsc --noEmit` clean.
+- [x] **`stabilize-orm@3.1.0` published.** `npm publish` reported
+      `+ stabilize-orm@3.1.0` with the tarball at 13.9 MB packed / 59.5 MB
+      unpacked across 71 files. **The registry had not begun serving it when
+      this was written** — `dist-tags.latest` was still `3.0.0` and
+      `versions` had no `3.1.0` entry ten minutes after the upload, from the
+      registry API directly rather than a cached `npm view`. npm's own message
+      is "your package is being processed and may take a few minutes to become
+      available", so the version is claimed and immutable from the moment
+      publish returns: it cannot be re-published, only waited on. The changes
+      that can break a working project:
       - Postgres `DECIMAL` now emits `DECIMAL(10,2)` where it used to emit a bare
         `DECIMAL`. A bare Postgres `DECIMAL` stores whatever it is handed; the
         constrained form does not. A regenerated migration narrows the column,
@@ -122,12 +128,13 @@ Committed as `acd07a8` and published. 616 tests pass / 0 fail across 33 files,
       - `CacheStats` gained a **required** `backend` field.
       - v3 ciphertext is unreadable by older versions.
       - A missing encryption key generates one instead of throwing.
-- [x] **`stabilize-cli@3.1.0` published**, which is what changes the registry
-      page: the 3.0.0 tarball shipped the README committed before the `query`
-      correction, and npm renders that file, so the package page was wrong in a
-      way only a republish could fix. The bundle is 3.50 MB and now carries the
-      3.1.0 ORM, so generated DDL changes for columns declaring `length`,
-      `precision` or `scale`.
+- [x] **`stabilize-cli@3.1.0` published** — submitted, and pending on the
+      registry for the same reason as the ORM above. This is the release that
+      changes the package page: the 3.0.0 tarball shipped the README committed
+      before the `query` correction, and npm renders that file, so the page was
+      wrong in a way only a republish could fix. The bundle is 3.50 MB, 4 files,
+      1.0 MB packed, and it now carries the 3.1.0 ORM — so generated DDL changes
+      for columns declaring `length`, `precision` or `scale`.
 - [ ] **The README's validation list never learned about `length`.** It names
       `required`, `minLength`/`maxLength`, `pattern` and `customValidator` —
       not the three options that 3.1.0 made load-bearing. The `stabilize-docs`
