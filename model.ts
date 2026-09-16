@@ -58,28 +58,93 @@ export interface ModelConfig {
 }
 
 /**
+ * Key under which the model registry is stored on `globalThis`.
+ *
+ * The registry is process-wide rather than module-local so that every copy of
+ * this module shares it. If the ORM is bundled more than once (duplicate
+ * dependency, mixed CJS/ESM resolution, a CLI plus an app), each copy would
+ * otherwise get its own Map and metadata written by one copy would be
+ * invisible to the other — models would look as though they were never
+ * defined.
+ */
+const MODEL_REGISTRY_KEY = Symbol.for("stabilize-orm.model-registry");
+
+function getModelRegistry(): Map<Function, ModelConfig> {
+  const root = globalThis as any;
+  if (!root[MODEL_REGISTRY_KEY]) {
+    root[MODEL_REGISTRY_KEY] = new Map<Function, ModelConfig>();
+  }
+  return root[MODEL_REGISTRY_KEY];
+}
+
+/**
+ * Rebuilds a model configuration from the static properties mirrored onto the
+ * class by {@link MetadataStorage.setModelMetadata}.
+ *
+ * @param model - The class constructor for the model.
+ * @returns The reconstructed configuration, or undefined if the class carries
+ * no table name and therefore was never registered.
+ */
+function getStaticMetadata(model: Function): ModelConfig | undefined {
+  const candidate = model as any;
+  if (!candidate || !candidate.tableName) return undefined;
+  return {
+    tableName: candidate.tableName,
+    versioned: candidate.versioned || false,
+    softDelete: candidate.softDelete || false,
+    columns: candidate.columns || {},
+    relations: Array.isArray(candidate.relations) ? candidate.relations : [],
+    scopes: candidate.scopes || {},
+    timestamps: candidate.timestamps || {},
+    hooks: candidate.hooks,
+  };
+}
+
+/**
  * Metadata storage for models.
  * Stores and retrieves model configuration such as columns, relations, scopes, etc.
  */
 export class MetadataStorage {
-  private static models: Map<Function, ModelConfig> = new Map();
-
   /**
    * Associates model metadata with a class constructor.
+   *
+   * The configuration is stored both in the shared registry and as static
+   * properties on the class itself, so it survives being read from a different
+   * copy of the ORM.
+   *
    * @param model - The class constructor for the model.
    * @param config - The model configuration object.
    */
   static setModelMetadata(model: Function, config: ModelConfig) {
-    this.models.set(model, config);
+    getModelRegistry().set(model, config);
+
+    // The mirror is best effort: the registry above is authoritative. A frozen
+    // class, or one whose static `columns` is a getter without a setter, would
+    // otherwise make registration throw.
+    const target = model as any;
+    if (typeof target !== "function") return;
+    try {
+      target.tableName = config.tableName;
+      target.versioned = config.versioned || false;
+      target.softDelete = config.softDelete || false;
+      target.columns = config.columns;
+      target.relations = config.relations || [];
+      target.scopes = config.scopes || {};
+      target.timestamps = config.timestamps || {};
+      if (config.hooks) target.hooks = config.hooks;
+    } catch {
+      // Ignore: metadata is still available through the registry.
+    }
   }
 
   /**
    * Retrieves the model configuration for a given model class.
    * @param model - The class constructor for the model.
-   * @returns The model configuration or undefined if not found.
+   * @returns The model configuration, falling back to the class statics when
+   * the class was registered by a different copy of the ORM.
    */
   static getModelMetadata(model: Function): ModelConfig | undefined {
-    return this.models.get(model);
+    return getModelRegistry().get(model) ?? getStaticMetadata(model);
   }
 
   /**
@@ -173,7 +238,7 @@ export class MetadataStorage {
    * @returns The model constructor or undefined if not found.
    */
   static getModelByTableName(tableName: string): Function | undefined {
-    for (const [model, config] of this.models) {
+    for (const [model, config] of getModelRegistry()) {
       if (config.tableName === tableName) {
         return model;
       }
@@ -202,7 +267,8 @@ export function defineModel(config: ModelConfig) {
     }
   }
 
-  // Store metadata
+  // Stored in the shared registry and mirrored onto the class as statics so
+  // that metadata stays readable across bundle boundaries.
   MetadataStorage.setModelMetadata(Model, {
     tableName: config.tableName,
     versioned: config.versioned || false,
@@ -211,6 +277,7 @@ export function defineModel(config: ModelConfig) {
     relations: config.relations || [],
     scopes: config.scopes || {},
     timestamps: config.timestamps || {},
+    hooks: config.hooks,
   });
 
   return Model;

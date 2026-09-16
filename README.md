@@ -3,50 +3,54 @@
 _A Modern, Type-Safe, and Expressive ORM for Bun_
 
 <p align="left">
-  <img src="./public/logo_both-transparent.png" alt="Stabilize ORM Logo" width="280" />
-</p>
-
-<p align="left">
   <a href="https://www.npmjs.com/package/stabilize-orm"><img src="https://img.shields.io/npm/v/stabilize-orm.svg?label=version&color=blue" alt="NPM Version"></a>
-  <a href="https://github.com/ElectronSz/stabilize-cli/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/stabilize-orm.svg?color=green" alt="License"></a>
-  <a href="https://github.com/ElectronSz/stabilize-cli"><img src="https://img.shields.io/badge/Cli-Stabilize%202.1.0-blue.svg" alt="Stabilize CLI"></a>
+  <a href="https://github.com/ElectronSz/stabilize-orm/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/stabilize-orm.svg?color=green" alt="License"></a>
+  <a href="https://github.com/ElectronSz/stabilize-cli"><img src="https://img.shields.io/badge/Cli-Stabilize%202.2.1-blue.svg" alt="Stabilize CLI"></a>
   <a href="#"><img src="https://img.shields.io/badge/PostgreSQL-supported-blue" alt="PostgreSQL"></a>
   <a href="#"><img src="https://img.shields.io/badge/MySQL-supported-blue" alt="MySQL"></a>
   <a href="#"><img src="https://img.shields.io/badge/SQLite-supported-blue" alt="SQLite"></a>
+  <a href="#"><img src="https://img.shields.io/badge/SQL%20Server-supported-blue" alt="SQL Server"></a>
 <a href="https://github.com/ElectronSz/stabilize-orm/actions/workflows/ci-cd.yml">
   <img src="https://github.com/ElectronSz/stabilize-orm/actions/workflows/ci-cd.yml/badge.svg" alt="Build Status">
 </a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
 </p>
 
-**Stabilize** is a lightweight, feature-rich ORM designed for performance and developer experience. It provides a unified, database-agnostic API for **PostgreSQL**, **MySQL**, and **SQLite**. Powered by a robust query builder, programmatic model definitions, automatic versioning, and a full-featured command-line interface, Stabilize is built to scale with your app.
+**Stabilize** is a lightweight, feature-rich ORM designed for performance and developer experience. It provides a unified, database-agnostic API for **PostgreSQL**, **MySQL/MariaDB**, **SQLite**, and **SQL Server**, plus a **MongoDB** document backend with the boundaries spelled out [below](#-mongodb). Powered by a robust query builder, programmatic model definitions, automatic versioning, and a full-featured command-line interface, Stabilize is built to scale with your app.
 
 ---
 
 ## 🚀 Features
 
-- **Unified API**: Write once, run on PostgreSQL, MySQL, or SQLite.
+- **Unified API**: Write once, run on PostgreSQL, MySQL/MariaDB, SQLite, or SQL Server.
+- **MongoDB Backend**: `DBType.MongoDB` runs the same repositories, relations, hooks and structured query builder against a document store, through the optional `mongodb` driver. Raw SQL, joins, unions, CTEs and raw clauses are refused with a `MONGO_UNSUPPORTED` error rather than mistranslated; the [boundaries](#-mongodb) are documented in full.
 - **Programmatic Model Definitions**: Define models and columns using the `defineModel` API with the `DataTypes` enum for database-agnostic schemas.
 - **Full-Featured CLI**: Generate models, manage migrations, seed data, and reset your database from the command line with [stabilize-cli](https://github.com/ElectronSz/stabilize-cli).
 - **Automatic Migrations**: Generate database-specific SQL schemas directly from your model definitions.
+- **First-Class SQL Server Support**: `DBType.MSSQL` selects the `mssql` v12 driver, with T-SQL-specific query generation (`OUTPUT INSERTED.*`, `OFFSET … FETCH`, `MERGE` for upserts) and schema generation via `OBJECT_ID` / `sys.indexes` probes. Placeholders are rewritten automatically — you keep writing `?`.
 - **Versioned Models & Time-Travel**: Enable versioning in your model configuration for automatic history tables and snapshot queries.
 - **Retry Logic**: Automatic exponential backoff for database queries to handle transient connection issues.
-- **Connection Pooling**: Efficient connection management for PostgreSQL and MySQL.
+- **Connection Pooling**: Efficient connection management for PostgreSQL, MySQL, and SQL Server, with `poolStats()` reporting borrowed/available/size on SQL Server.
 - **Transactional Integrity**: Built-in support for atomic transactions with automatic rollback on failure.
 - **Advanced Query Builder**: Fluent, chainable API for building complex queries, including joins, filters, ordering, and pagination.
 - **Pagination Helper**: Easily paginate any query with `.paginate(page, pageSize)` and get `{ data, total, page, pageSize }`.
 - **Advanced Model Validation**: Enforce rules like `required`, `minLength`, `maxLength`, `pattern`, and custom validators—errors are thrown on invalid input.
-- **Model Relationships**: Define `OneToOne`, `ManyToOne`, `OneToMany`, and `ManyToMany` relationships in the model configuration.
+- **Model Relationships**: Define `OneToOne`, `ManyToOne`, `OneToMany`, and `ManyToMany` relationships in the model configuration, eager-loaded with `relations` or `.withRelations()`.
+- **Many-to-Many Link Management**: `attach()`, `detach()` and `sync()` edit a join table directly, without loading either side.
+- **validateAll**: Collect every validation failure at once, rather than only the first.
+- **findOrFail / firstOrFail**: Throw a `NOT_FOUND_ERROR` instead of returning `null`.
+- **Raw Clause Builders**: `.orderByRaw()`, `.groupByRaw()` and `.havingRaw()` for expressions that are not column names.
 - **Soft Deletes**: Enable soft deletes in the model configuration for transparent "deleted" flags and safe row removal.
 - **Lifecycle Hooks**: Define hooks in the model configuration or as class methods for lifecycle events like `beforeCreate`, `afterUpdate`, etc.
 - **Pluggable Logging**: Includes a robust `StabilizeLogger` with support for file-based, rotating logs.
 - **Custom Errors**: `StabilizeError` provides clear, consistent error handling.
 - **Caching Layer**: Optional Redis-backed caching with `cache-aside` and `write-through` strategies.
+- **Column Encryption**: Mark a column with `encrypted: true` to transparently encrypt it on write and decrypt it on read with AES-256-GCM — including for rows served from cache.
 - **Custom Query Scopes**: Define reusable query conditions (scopes) in models for simplified, reusable filtering logic.
 - **Timestamps**: Automatically manage `createdAt` and `updatedAt` columns for tracking record creation and update times.
 - **SQL Default Expressions**: Support database-side default expressions (e.g., `gen_random_uuid()`, `NOW()`) for columns using the `sqlDefault()` helper.
 - **Nested Relations (Eager Loading)**: Load deeply nested relations using dot notation like `"roles.permissions"`.
-- **AutoMigrate with Index Management**: Automatically create, detect, and remove indexes and unique constraints during migration.
+- **AutoMigrate with Index Management**: Create missing tables, add missing columns, and add missing indexes and unique constraints in one pass. It is additive only — it never drops a column, never changes a column type, and never removes an index.
 - **Advanced Query Builder Filters**: Chainable `.orWhere()`, `.whereIn()`, `.whereNotIn()`, `.whereNull()`, `.whereNotNull()`, `.whereBetween()`, `.groupBy()`, `.having()`, `.lock()` methods.
 - **Optimistic Locking**: Add `optimisticLock: true` to a version column to automatically detect concurrent modification conflicts and throw `CONCURRENT_MODIFICATION` errors.
 - **findAndCount**: Get paginated results with a total count in one call.
@@ -170,6 +174,138 @@ export const orm = new Stabilize(dbConfig, cacheConfig, loggerConfig);
 
 ---
 
+## 🍃 MongoDB
+
+`DBType.MongoDB` selects a document backend rather than a fifth SQL dialect. Its
+driver is the only optional dependency in the package, so install it alongside:
+
+```bash
+bun add mongodb
+```
+
+```typescript
+// config/database.ts
+import { DBType, type DBConfig } from "stabilize-orm";
+
+const dbConfig: DBConfig = {
+  type: DBType.MongoDB,
+  connectionString: process.env.MONGO_URL || "mongodb://localhost:27017/mydb",
+  // Optional. The fallback database for a URI that omits one from its path,
+  // which is how a mongo URI is usually written in development.
+  database: "mydb",
+  // Optional. Passed verbatim to the driver's `MongoClient` — `tls`,
+  // `authSource`, `maxPoolSize`, `retryWrites` and anything else the ORM has no
+  // opinion about.
+  mongoOptions: { maxPoolSize: 20 },
+};
+
+export default dbConfig;
+```
+
+Models, repositories, relations, hooks, versioning, soft deletes, validation,
+encryption, aggregates and transactions work as they do on SQL. A query is
+written with the query builder's *structured* methods — the ones that record a
+condition rather than SQL text:
+
+```typescript
+const users = await orm
+  .getRepository(User)
+  .find()
+  .whereEq("isActive", true)
+  .whereIn("role", ["admin", "editor"])
+  .orderBy("createdAt", "DESC")
+  .withRelations("roles")
+  .execute(orm.client);
+```
+
+`healthCheck()` pings the server. `poolStats()` returns
+`{ active: -1, idle: -1, total: -1 }`: the driver's pool is internal and
+per-server, so there is no honest number to report and the sentinel says so
+rather than inventing one.
+
+### What MongoDB cannot do
+
+A document store is not a SQL engine, and Stabilize refuses to guess where the
+two disagree. Every one of these is deliberate, and each is reported rather than
+silently mistranslated — a dropped `join()` would return the wrong rows with no
+error to notice.
+
+- **Raw SQL is refused.** `rawQuery()`, `rawExec()`, `query()` and `queryExec()`
+  throw a `StabilizeError` with code `MONGO_UNSUPPORTED`. Use the repository API
+  or the query builder's structured methods instead.
+
+  ```typescript
+  await orm.rawQuery("SELECT * FROM users WHERE age > ?", [25]);
+  // StabilizeError: Raw SQL is not available on MongoDB. ...
+  ```
+
+- **Joins, unions, CTEs and raw clauses throw.** `join()`, `innerJoin()`,
+  `leftJoin()`, `rightJoin()`, `fullJoin()`, `crossJoin()`, `union()`,
+  `unionAll()`, `with()`, `withRecursive()`, `whereRaw()`, `whereRef()`,
+  `whereExists()`, `whereNotExists()`, `selectRaw()`, `orderByRaw()`,
+  `groupByRaw()`, `having()`, `distinct()` and the SQL-text forms of
+  `where()`/`orWhere()`/`whereNot()` have no MongoDB equivalent. The throw
+  happens when the query is **executed**, not when the clause is added, and it
+  names every offending method at once:
+
+  ```typescript
+  await repo
+    .find()
+    .innerJoin("posts", "posts.user_id = users.id")
+    .whereRaw("LOWER(name) = 'ada'")
+    .execute(orm.client);
+  // StabilizeError: This query cannot be translated to MongoDB: innerJoin,
+  // whereRaw have no MongoDB equivalent. ... Use withRelations() for related
+  // documents, or run this query against a SQL backend.
+  ```
+
+  For a join, the replacement is `withRelations()`, which loads related
+  documents with batched reads rather than one statement:
+
+  ```typescript
+  await repo.find().withRelations("posts", "posts.comments").execute(orm.client);
+  ```
+
+- **`lock()` / `forUpdate()` is a no-op.** MongoDB has no row lock to map it
+  onto, so the clause is not rendered and the query runs unlocked rather than
+  failing. `lockForUpdate()` therefore reads the row without protecting it —
+  use `updateBy()` with a condition, or an optimistic lock column, for a
+  read-modify-write that has to be safe.
+
+- **`DECIMAL` is stored as a `double`.** MongoDB has no exact decimal unless the
+  caller supplies a `Decimal128`, so a `DECIMAL` column loses precision the way
+  a binary float does. For money, store the smallest unit as an `INTEGER`/`BIGINT`
+  or the value as a `STRING`.
+
+- **Auto-increment ids come from a counters collection — and they roll back.**
+  Ids are reserved by a `$inc` against `stabilize_counters`, keyed by collection
+  name, rather than by the server. Because that reservation runs inside the same
+  transaction as the write, an aborted transaction gives its ids back: the next
+  insert re-uses them. MySQL behaves the opposite way — InnoDB's auto-increment
+  counter is not transactional, so an aborted insert leaks the gap.
+
+- **Transactions need a replica set or a sharded cluster.** A standalone
+  `mongod` serves reads but rejects every transaction — and every repository
+  write (`create()`, `update()`, `delete()`, `bulkCreate()`, `upsert()` …) runs
+  inside one, so a standalone makes writes fail generally, not only
+  explicitly-transactional code. The client warns at connect time and reports
+  the failure as `TX_ERROR`:
+
+  ```typescript
+  // Standalone mongod, no replica set:
+  await repo.create({ name: "Ada" });
+  // StabilizeError (TX_ERROR): MongoDB transactions require a replica set or
+  // sharded cluster, and this server is a standalone. Every write goes through
+  // a transaction, so start the server with --replSet and run rs.initiate()
+  // (or point the connection at an existing replica set).
+  ```
+
+  Run a single-node replica set in development
+  (`rs.initiate()` on a `mongod --replSet rs0`) and every write path works
+  unchanged.
+
+---
+
 ## 🏗️ Models & Relationships
 
 Define your tables as classes using the `defineModel` function. The `DataTypes` enum ensures database-agnostic schemas.
@@ -185,9 +321,9 @@ const User = defineModel({
   tableName: "users",
   versioned: true,
   columns: {
-    id: { type: DataTypes.Integer, required: true },
+    id: { type: DataTypes.INTEGER, required: true },
     email: {
-      type: DataTypes.String,
+      type: DataTypes.STRING,
       length: 100,
       required: true,
       unique: true,
@@ -198,7 +334,9 @@ const User = defineModel({
       type: RelationType.OneToMany,
       target: () => UserRole,
       property: "roles",
-      foreignKey: "userId",
+      // The key lives on the target table, so the OneToMany side names it
+      // with inverseKey. `foreignKey` is accepted as a synonym here.
+      inverseKey: "userId",
     },
   ],
   hooks: {
@@ -247,9 +385,9 @@ Validation errors are thrown on create/update if data is invalid.
 const User = defineModel({
   tableName: "users",
   columns: {
-    id: { type: DataTypes.Integer, required: true },
+    id: { type: DataTypes.INTEGER, required: true },
     email: {
-      type: DataTypes.String,
+      type: DataTypes.STRING,
       required: true,
       unique: true,
       minLength: 6,
@@ -258,12 +396,68 @@ const User = defineModel({
         val.endsWith("@offbytesecure.com") ||
         "Must use an @offbytesecure.com email",
     },
-    password: { type: DataTypes.String, minLength: 8 },
+    password: { type: DataTypes.STRING, minLength: 8 },
   },
 });
 ```
 
 ---
+
+## 🔐 Column Encryption
+
+Mark a column with `encrypted: true` and the ORM encrypts it on the way in and
+decrypts it on the way out. Your code keeps reading and writing ordinary
+strings; the ciphertext is only ever visible in the database.
+
+```typescript
+const User = defineModel({
+  tableName: "users",
+  columns: {
+    id: { type: DataTypes.INTEGER, required: true },
+    email: { type: DataTypes.STRING, required: true, unique: true },
+    nationalId: { type: DataTypes.STRING, encrypted: true },
+  },
+});
+
+await userRepository.create({
+  email: "lwazicd@icloud.com",
+  nationalId: "9001015800085", // stored as v2:<iv>:<tag>:<ciphertext>
+});
+
+const user = await userRepository.findOne(1);
+console.log(user.nationalId); // "9001015800085" — decrypted on read
+```
+
+Encryption uses AES-256-GCM, so a value that has been tampered with or truncated
+fails to decrypt rather than quietly returning corrupted plaintext. Values carry
+a `v2:` prefix that identifies the format. Encrypted columns are also decrypted
+when a row is served from cache, so a cache hit returns the same shape as a miss.
+
+### The encryption key
+
+The key is read from the `ORM_ENCRYPTION_KEY` environment variable on every call,
+so it can be set after your modules are imported:
+
+```bash
+# 32 bytes, or 64 hex characters
+export ORM_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+```
+
+There is deliberately no default. **If `ORM_ENCRYPTION_KEY` is unset, reading or
+writing an encrypted column throws** rather than falling back to a built-in key.
+Earlier versions did fall back to a constant compiled into the package, which
+meant a deployment that never set the variable encrypted its columns with a value
+anyone who read the published source could reproduce. Failing loudly is the
+intended behaviour: it is a deployment mistake, not a runtime condition.
+
+If you have data written by one of those earlier versions, set the key to the
+legacy value `f71a3c8e9b12d5a49c0a3f98b1f2e46d` to keep reading it, then re-save
+those rows under a key of your own. Those rows use AES-CBC and are still read
+correctly; everything newly written uses GCM.
+
+---
+
+## ⏳ Versioning & Auditing
 
 ## ⏳ Versioning & Auditing
 
@@ -281,8 +475,8 @@ const User = defineModel({
   tableName: "users",
   versioned: true,
   columns: {
-    id: { type: DataTypes.Integer, required: true },
-    name: { type: DataTypes.String, length: 100 },
+    id: { type: DataTypes.INTEGER, required: true },
+    name: { type: DataTypes.STRING, length: 100 },
   },
 });
 
@@ -316,10 +510,10 @@ import { defineModel, DataTypes } from "stabilize-orm";
 const User = defineModel({
   tableName: "users",
   columns: {
-    id: { type: DataTypes.Integer, required: true },
-    name: { type: DataTypes.String, length: 100 },
-    createdAt: { type: DataTypes.DateTime },
-    updatedAt: { type: DataTypes.DateTime },
+    id: { type: DataTypes.INTEGER, required: true },
+    name: { type: DataTypes.STRING, length: 100 },
+    createdAt: { type: DataTypes.DATETIME },
+    updatedAt: { type: DataTypes.DATETIME },
   },
   hooks: {
     beforeCreate: (entity) => {
@@ -348,101 +542,67 @@ Supported hooks: `beforeCreate`, `afterCreate`, `beforeUpdate`, `afterUpdate`, `
 
 ## 💻 Command-Line Interface (CLI)
 
-Stabilize includes a powerful CLI for managing your workflow. See: [stabilize-cli on GitHub](https://github.com/ElectronSz/stabilize-cli)
+Stabilize includes a powerful CLI with 31 commands. See: [stabilize-cli on GitHub](https://github.com/ElectronSz/stabilize-cli)
 
-### Generating Files
+### Generate
 
-- **Generate a model**:
+```bash
+stabilize-cli generate:model User name:string email:string age:int --versioned  # g:m
+stabilize-cli generate:migration User                                           # g:mg
+stabilize-cli generate:seed User --count 10                                     # g:s
+stabilize-cli generate:api Product --prefix /v1                                # g:a
+stabilize-cli generate:all Order userId:string total:decimal --count 20         # g:x
+stabilize-cli generate:test User                                               # g:t
+```
 
-  ```bash
-  stabilize-cli generate:model Product
-  ```
+### Migrate
 
-- **Generate a migration from a model**:
+```bash
+stabilize-cli migrate
+stabilize-cli migrate:rollback
+stabilize-cli migrate:fresh --force
+stabilize-cli migrate:status
+stabilize-cli migrate:pending
+stabilize-cli migrate:auto
+```
 
-  ```bash
-  stabilize-cli generate:migration User
-  ```
+`migrate:auto` runs AutoMigrate against the live database — creating missing
+tables, adding missing columns and adding missing indexes. Like the library API
+it is additive only: it never drops a column and never changes a column type.
 
-- **Generate a seed file**:
+### Database
 
-  ```bash
-  stabilize-cli generate:seed InitialRoles
-  ```
+```bash
+stabilize-cli db:drop --force
+stabilize-cli db:reset --force
+stabilize-cli db:truncate users --force
+stabilize-cli db:backup --output ./backups
+stabilize-cli db:restore backups/backup.db --force
+stabilize-cli db:tables
+stabilize-cli db:size
+stabilize-cli db:diff
+stabilize-cli db:console
+stabilize-cli db:table:info users
+```
 
-- **Generate a REST API scaffold**:
-  ```bash
-  stabilize-cli generate:api User
-  ```
+### Model & Config
 
-### Database & Migration Management
-
-- **Run all pending migrations**:
-
-  ```bash
-  stabilize-cli migrate
-  ```
-
-- **Roll back the last migration**:
-
-  ```bash
-  stabilize-cli migrate:rollback
-  ```
-
-- **Fresh migration (drop + re-migrate)**:
-
-  ```bash
-  stabilize-cli migrate:fresh --force
-  ```
-
-- **Run all pending seeds (in dependency order)**:
-
-  ```bash
-  stabilize-cli seed
-  ```
-
-- **Check the status of migrations and seeds**:
-
-  ```bash
-  stabilize-cli status
-  ```
-
-- **Reset the database (drop, migrate, seed)**:
-  ```bash
-  stabilize-cli db:reset
-  ```
-
-### Backup & Restore
-
-- **Backup the database**:
-
-  ```bash
-  stabilize-cli db:backup
-  ```
-
-- **Restore from a backup**:
-  ```bash
-  stabilize-cli db:restore backups/backup_20250101120000.db --force
-  ```
+```bash
+stabilize-cli model:validate
+stabilize-cli model:info User
+stabilize-cli config:init --type postgres
+```
 
 ### Diagnostics
 
-- **Database size statistics**:
-
-  ```bash
-  stabilize-cli db:size
-  ```
-
-- **Health check**:
-
-  ```bash
-  stabilize-cli health
-  ```
-
-- **CLI info**:
-  ```bash
-  stabilize-cli info
-  ```
+```bash
+stabilize-cli seed
+stabilize-cli status
+stabilize-cli health
+stabilize-cli health:json
+stabilize-cli query 'SELECT * FROM users LIMIT 5'
+stabilize-cli info
+```
 
 ---
 
@@ -520,11 +680,11 @@ import { orm } from "./db";
 const User = defineModel({
   tableName: "users",
   columns: {
-    id: { type: DataTypes.Integer, required: true },
-    email: { type: DataTypes.String, length: 100, required: true },
-    isActive: { type: DataTypes.Boolean, required: true },
-    createdAt: { type: DataTypes.DateTime },
-    updatedAt: { type: DataTypes.DateTime },
+    id: { type: DataTypes.INTEGER, required: true },
+    email: { type: DataTypes.STRING, length: 100, required: true },
+    isActive: { type: DataTypes.BOOLEAN, required: true },
+    createdAt: { type: DataTypes.DATETIME },
+    updatedAt: { type: DataTypes.DATETIME },
   },
   scopes: {
     active: (qb) => qb.where("isActive = ?", true),
@@ -568,10 +728,10 @@ import { orm } from "./db";
 const User = defineModel({
   tableName: "users",
   columns: {
-    id: { type: DataTypes.Integer, required: true },
-    email: { type: DataTypes.String, length: 100, required: true },
-    createdAt: { type: DataTypes.DateTime },
-    updatedAt: { type: DataTypes.DateTime },
+    id: { type: DataTypes.INTEGER, required: true },
+    email: { type: DataTypes.STRING, length: 100, required: true },
+    createdAt: { type: DataTypes.DATETIME },
+    updatedAt: { type: DataTypes.DATETIME },
   },
   timestamps: {
     createdAt: "createdAt",
@@ -618,9 +778,9 @@ const User = defineModel({
   tableName: "users",
   softDelete: true,
   columns: {
-    id: { type: DataTypes.Integer, required: true },
-    email: { type: DataTypes.String, length: 100, required: true },
-    deletedAt: { type: DataTypes.DateTime, softDelete: true },
+    id: { type: DataTypes.INTEGER, required: true },
+    email: { type: DataTypes.STRING, length: 100, required: true },
+    deletedAt: { type: DataTypes.DATETIME, softDelete: true },
   },
 });
 
@@ -688,9 +848,9 @@ import { defineModel, DataTypes } from "stabilize-orm";
 const User = defineModel({
   tableName: "users",
   columns: {
-    id: { type: DataTypes.Integer, required: true },
-    name: { type: DataTypes.String },
-    version: { type: DataTypes.Integer, optimisticLock: true },
+    id: { type: DataTypes.INTEGER, required: true },
+    name: { type: DataTypes.STRING },
+    version: { type: DataTypes.INTEGER, optimisticLock: true },
   },
 });
 
@@ -730,9 +890,9 @@ const User = defineModel({
       required: true,
       defaultExpression: sqlDefault("gen_random_uuid()"),
     },
-    name: { type: DataTypes.String },
+    name: { type: DataTypes.STRING },
     createdAt: {
-      type: DataTypes.DateTime,
+      type: DataTypes.DATETIME,
       defaultExpression: sqlDefault("NOW()"),
     },
   },
@@ -760,17 +920,117 @@ const results = await userRepository
   .execute();
 ```
 
+### Raw Clauses
+
+`orderBy`, `groupBy` and `having` take a column name. When you need an
+expression instead, use the raw variants:
+
+```typescript
+const results = await orderRepository
+  .find()
+  .select("status", "COUNT(*) AS total")
+  .groupByRaw("strftime('%Y-%m', createdAt)")
+  .havingRaw("COUNT(*) > ?", 10)
+  .orderByRaw("CASE WHEN status = 'urgent' THEN 0 ELSE 1 END")
+  .execute(db.client);
+```
+
+`orderByRaw` takes an optional direction as its second argument
+(`orderByRaw("LENGTH(title)", "DESC")`). Raw and plain clauses compose, and raw
+parameters are bound in the order they appear.
+
 ---
 
-## 🔗 Nested Relations
+## 🔗 Relations
 
-Load deeply nested relations using dot notation:
+Relations are eager-loaded, one batched query per relation. A to-many relation
+comes back as an array (empty when there is nothing linked), a to-one relation
+as the row or `null`.
 
 ```typescript
 const user = await userRepository.findOne(1, {
   relations: ["roles", "roles.permissions"],
 });
+// user.roles[0].permissions — nested paths use dot notation
 ```
+
+Relations can also be requested on the query builder, alongside `where`,
+`limit`, `orderBy` and `paginate`:
+
+```typescript
+const users = await userRepository
+  .find()
+  .where("isActive = ?", true)
+  .withRelations("roles", "roles.permissions")
+  .limit(10)
+  .execute(db.client);
+```
+
+`create`, `bulkCreate`, `findOne`, `findMany`, `findBy`, `findOneBy` and
+`findAndCount` all accept a `relations` option:
+
+```typescript
+const [user, post] = await userRepository.bulkCreate(
+  [{ email: "a@b.c" }, { email: "d@e.f" }],
+  { relations: ["roles"] },
+);
+```
+
+Related rows are read through the target model, so its soft-delete filter
+applies — a deleted child is not returned as part of its parent.
+
+### Managing Many-to-Many Links
+
+`attach`, `detach` and `sync` write the join table directly, so a many-to-many
+relation can be edited without loading and re-saving either side.
+
+```typescript
+await postRepository.attach(postId, "tags", [1, 2]); // links 1 and 2
+await postRepository.detach(postId, "tags", [2]);    // unlinks 2
+await postRepository.detach(postId, "tags");         // unlinks everything
+
+// Makes the link set exactly [3, 4]: adds what is missing, removes what is not
+// in the list, leaves the rest alone.
+const { attached, detached } = await postRepository.sync(postId, "tags", [3, 4]);
+```
+
+All three are idempotent, accept a single id or an array, and return how many
+links they changed. `sync` runs in a transaction.
+
+---
+
+## 🥇 findOrFail / firstOrFail
+
+`findOne` and `first` return `null` on a miss. The `*OrFail` variants throw a
+`StabilizeError` with code `NOT_FOUND_ERROR` instead, so a miss cannot be
+mistaken for an empty result.
+
+```typescript
+const user = await userRepository.findOrFail(1);            // never null
+const admin = await userRepository.firstOrFail({ role: "admin" });
+
+// Still loads relations
+const post = await postRepository.findOrFail(7, { relations: ["author"] });
+```
+
+---
+
+## 🛡️ validateAll
+
+`create` and `update` validate and throw on the **first** failure. When
+validating input from a form you usually want every failure at once:
+
+```typescript
+const errors = userRepository.validateAll({ email: "nope", name: "ab" });
+// ["Field email does not match pattern", "Field name too short"]
+
+if (errors.length) {
+  return res.status(422).json({ errors });
+}
+```
+
+Pass `true` as the second argument to skip the `required` rules, which is how
+an update validates a partial entity.
 
 ---
 
@@ -1084,7 +1344,7 @@ const id = generateUUID();
 
 ## 📑 License
 
-Licensed under the MIT License. See [LICENSE.md](./LICENSE.md) for details.
+Licensed under the MIT License. See [LICENSE](./LICENSE) for details.
 
 ---
 
@@ -1092,6 +1352,6 @@ Licensed under the MIT License. See [LICENSE.md](./LICENSE.md) for details.
 
 Created with ❤️ by **ElectronSz**
 <br/>
-<em>File last updated: 2026-04-02</em>
+<em>File last updated: 2026-09-15</em>
 
 </div>

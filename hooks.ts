@@ -52,17 +52,28 @@ export function registerHooks(
  * Combines hooks from MetadataStorage and class methods.
  * @param entity The entity instance.
  * @param type The hook type (e.g., 'beforeCreate').
+ * @param model The model class the entity belongs to. Pass it whenever the
+ * entity may be a plain row rather than a class instance.
  * @returns An array of Hook objects to execute.
  */
-export function getHooks(entity: any, type: HookType): Hook[] {
+export function getHooks(
+  entity: any,
+  type: HookType,
+  model?: Function,
+): Hook[] {
   const hooks: Hook[] = [];
   if (!entity) return hooks;
   const proto = Object.getPrototypeOf(entity);
-  if (!proto) return hooks;
-  const model = proto.constructor;
+  if (!proto && !model) return hooks;
+
+  // The caller's model wins over the entity's prototype. Reads return plain
+  // objects straight from the driver, so `proto.constructor` is `Object` and
+  // the metadata lookup below found nothing — which is why every `after*`
+  // hook, and both delete hooks, silently never ran.
+  const resolved = model ?? proto.constructor;
 
   // Get hooks from MetadataStorage
-  const config = MetadataStorage.getModelMetadata(model);
+  const config = MetadataStorage.getModelMetadata(resolved);
   if (config?.hooks?.[type]) {
     const callbacks = Array.isArray(config.hooks[type])
       ? config.hooks[type]

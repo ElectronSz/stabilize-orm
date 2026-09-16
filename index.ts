@@ -41,6 +41,12 @@ import {
   type StabilizeEventHandler,
   StabilizeEmitter,
   generateUUID,
+  // The two MongoDB types this package re-exports. Both are reached through
+  // `types.ts`, the shared type surface: `mongo-query` and `mongo-schema` are
+  // not published entry points, so neither is somewhere a consumer could name
+  // them from.
+  type Predicate,
+  type MongoStep,
 } from "./types";
 import { defineModel, MetadataStorage } from "./model";
 import type { Hook } from "./hooks";
@@ -50,6 +56,8 @@ export class Stabilize {
   private cache: Cache | null;
   private logger: Logger;
   public events: StabilizeEmitter;
+  /** Repositories handed out so far, keyed by model. @see getRepository */
+  private repositories = new Map<Function, Repository<any>>();
 
   constructor(
     config: DBConfig,
@@ -82,8 +90,22 @@ export class Stabilize {
    * ```
    */
   getRepository<T>(model: new (...args: any[]) => T): Repository<T> {
-    const cacheConfig = this.cache ? this.cache.config : undefined;
-    return new Repository(this.client, model, cacheConfig, this.logger);
+    // Memoised per model. Every Repository owns an optional cache handle, so
+    // building a new one on each call opened a second Redis connection that
+    // nothing disconnected and that `getCacheStats()` never saw — it reports on
+    // the ORM's own cache, which no repository was using.
+    const existing = this.repositories.get(model);
+    if (existing) return existing as Repository<T>;
+
+    const repository = new Repository(
+      this.client,
+      model,
+      this.cache?.config,
+      this.logger,
+      this.cache,
+    );
+    this.repositories.set(model, repository);
+    return repository;
   }
 
   /**
@@ -155,14 +177,21 @@ export class Stabilize {
   }> {
     const start = performance.now();
     try {
-      const results = await this.client.query("SELECT 1 AS ok");
+      // MongoDB has no `SELECT 1`; `ping` is its equivalent liveness command.
+      // Both are wrapped the same way so a slow or unreachable server lands in
+      // the same catch rather than escaping as a different error shape.
+      const isMongo = this.client.config.type === DBType.MongoDB;
+      const healthy = isMongo
+        ? (await this.client.mongoCommand({ ping: 1 })).ok === 1
+        : (await this.client.query("SELECT 1 AS ok")).length > 0;
+
       const cacheStatus = this.cache
         ? (await this.cache.get("healthcheck"))
           ? "connected"
           : "connected (miss)"
         : "disabled";
       return {
-        status: results.length > 0 ? "healthy" : "unhealthy",
+        status: healthy ? "healthy" : "unhealthy",
         database: this.client.config.type,
         latencyMs: Number((performance.now() - start).toFixed(2)),
         cacheStatus,
@@ -219,6 +248,24 @@ export class Stabilize {
         total: raw._allConnections.length,
       };
     }
+    // `Stabilize.client` is the DBClient wrapper, so the driver's pool is one
+    // level down. Only the SQL Server branch below reads through it; the two
+    // checks above are left reading `raw` exactly as they always have.
+    const pool = raw.client ?? raw;
+    if (
+      this.client.config.type === DBType.MSSQL &&
+      typeof pool?.size === "number"
+    ) {
+      return {
+        active: pool.borrowed ?? 0,
+        idle: pool.available ?? 0,
+        total: pool.size ?? 0,
+      };
+    }
+    // MongoDB and SQLite land here deliberately. Neither exposes a pool whose
+    // occupancy can be read synchronously — the mongo driver's pool is internal
+    // and per-server, and SQLite has no pool at all — so the sentinel is the
+    // honest answer rather than a number invented to fill the shape.
     return { active: -1, idle: -1, total: -1 };
   }
 }
@@ -264,4 +311,11 @@ export type {
   QueryLogEntry,
   StabilizeEvent,
   StabilizeEventHandler,
+  // The two MongoDB types a consumer can legitimately need to name: the
+  // predicate the query builder records, and the serializable migration step.
+  // Both are reached through `types.ts`, the shared type surface, rather than
+  // through `mongo-query`/`mongo-schema` — neither of which is a published
+  // entry point.
+  Predicate,
+  MongoStep,
 };
