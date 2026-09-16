@@ -4,7 +4,7 @@
  * @author ElectronSz
  */
 
-import { Database, Statement } from "bun:sqlite";
+import { SQLiteConnection, type SQLiteStatement } from "./sqlite-driver";
 import { Pool, type PoolClient } from "pg";
 import mysql from "mysql2/promise";
 import sql from "mssql";
@@ -156,15 +156,15 @@ export function bindMySQLParams(params: any[]): any[] {
 }
 
 /**
- * Encodes the parameters of a SQLite statement for `bun:sqlite`.
+ * Encodes the parameters of a SQLite statement for the SQLite driver.
  *
- * `bun:sqlite` binds only strings, numbers, bigints, booleans, `null` and typed
- * arrays. A plain object is bound as **NULL** — no error, no warning, the value
- * is simply gone — and an array is spread as if it were the parameter list, so
- * `[1, 2, 3]` for one placeholder fails the whole statement with "SQLite query
- * expected 1 values, received 3". Neither is what a `DataTypes.JSON` column
- * means, and the MySQL and SQL Server paths already encode both as JSON text.
- * This is the same answer for the third driver.
+ * SQLite drivers bind only strings, numbers, bigints, booleans, `null` and
+ * typed arrays. A plain object is bound as **NULL** — no error, no warning, the
+ * value is simply gone — and an array is spread as if it were the parameter
+ * list, so `[1, 2, 3]` for one placeholder fails the whole statement with
+ * "SQLite query expected 1 values, received 3". Neither is what a
+ * `DataTypes.JSON` column means, and the MySQL and SQL Server paths already
+ * encode both as JSON text. This is the same answer for the third driver.
  *
  * Returned as a new list rather than mutated, matching {@link bindMySQLParams}:
  * callers reuse the array they built.
@@ -354,7 +354,7 @@ async function loadMongoDriver(): Promise<any> {
  */
 export class DBClient {
   private client!:
-    | Database
+    | SQLiteConnection
     | Pool
     | mysql.Pool
     | PoolClient
@@ -403,7 +403,7 @@ export class DBClient {
    */
   private mongoSession: MongoSessionHandle | null = null;
 
-  private preparedStatements: Map<string, Statement> = new Map();
+  private preparedStatements: Map<string, SQLiteStatement> = new Map();
   public isTransactionClient: boolean = false;
 
   /**
@@ -469,8 +469,15 @@ export class DBClient {
    */
   private initializeClient(config: DBConfig) {
     if (isSQLiteConfig(config)) {
-      this.client = new Database(config.connectionString, { create: true });
-      this.logger.logDebug(`Initialized Bun SQLite client.`);
+      // Whichever of `bun:sqlite` / `node:sqlite` this runtime provides, behind
+      // one synchronous interface. Resolved here rather than imported
+      // statically so the module graph carries no runtime-specific specifier.
+      this.client = new SQLiteConnection(config.connectionString, {
+        create: true,
+      });
+      this.logger.logDebug(
+        `Initialized SQLite client (${this.client.driver} driver).`,
+      );
     } else if (isMySQLConfig(config)) {
       this.client = mysql.createPool(config.connectionString);
       this.logger.logDebug(`Initialized MySQL Pool client.`);
@@ -760,7 +767,7 @@ export class DBClient {
       try {
         let result: any;
 
-        if (this.client instanceof Database) {
+        if (this.client instanceof SQLiteConnection) {
           let stmt = this.preparedStatements.get(query);
           if (!stmt) {
             stmt = this.client.prepare(query);
@@ -877,13 +884,14 @@ export class DBClient {
   private async runTransaction<T>(
     callback: (txClient: DBClient) => Promise<T>,
   ): Promise<T> {
-    if (this.client instanceof Database) {
-      // `bun:sqlite`'s own `db.transaction()` is synchronous: it issues
-      // COMMIT as soon as the callback returns, and an async callback returns
-      // a pending promise at its first `await`. The COMMIT would therefore
-      // land before the work finished, so a later throw rolled nothing back
-      // and every write in the library ran non-atomically. Drive the
-      // transaction explicitly instead, which awaits properly.
+    if (this.client instanceof SQLiteConnection) {
+      // The SQLite drivers' own transaction helper is synchronous: Bun's
+      // `db.transaction()` issues COMMIT as soon as the callback returns, and an
+      // async callback returns a pending promise at its first `await`. The
+      // COMMIT would therefore land before the work finished, so a later throw
+      // rolled nothing back and every write in the library ran non-atomically.
+      // Node's driver has no such helper at all. Drive the transaction
+      // explicitly instead, which awaits properly on both.
       this.logger.logDebug("Starting SQLite transaction.");
       // SQLite runs on a single connection, so the callback receives this same
       // client rather than a new one. Mark it as being inside a transaction for
@@ -1024,7 +1032,7 @@ export class DBClient {
    * @returns Promise that resolves once the connection is closed.
    */
   async close() {
-    if (this.client instanceof Database) {
+    if (this.client instanceof SQLiteConnection) {
       this.client.close();
     } else if (
       this.config.type === DBType.MSSQL &&
@@ -1087,7 +1095,7 @@ export class DBClient {
     const start = Date.now();
     let affectedRows = 0;
 
-    if (this.client instanceof Database) {
+    if (this.client instanceof SQLiteConnection) {
       const result = this.client.run(query, ...bindSQLiteParams(params));
       affectedRows = result.changes;
     } else if (this.config.type === DBType.MySQL) {
@@ -1124,7 +1132,7 @@ export class DBClient {
   async migrationQuery(query: string, params: any[] = []): Promise<void> {
     if (this.config.type === DBType.MongoDB) this.rejectSQLForMongo();
     const start = Date.now();
-    if (this.client instanceof Database) {
+    if (this.client instanceof SQLiteConnection) {
       let stmt = this.preparedStatements.get(query);
       if (!stmt) {
         stmt = this.client.prepare(query);

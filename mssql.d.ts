@@ -5,7 +5,7 @@
  * `mssql` ships no declarations of its own, and taking `@types/mssql` as a
  * dependency would leave every consumer of the published package needing it
  * too. Only the surface the client actually touches is declared, in the same
- * spirit as `bun-sqlite.d.ts`.
+ * spirit as `sqlite-drivers.d.ts`.
  */
 
 declare module "mssql" {

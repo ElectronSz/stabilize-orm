@@ -1,6 +1,6 @@
 # Stabilize ORM
 
-_A Modern, Type-Safe, and Expressive ORM for Bun_
+_A Modern, Type-Safe, and Expressive ORM for Bun and Node.js_
 
 <p align="left">
   <a href="https://www.npmjs.com/package/stabilize-orm"><img src="https://img.shields.io/npm/v/stabilize-orm.svg?label=version&color=blue" alt="NPM Version"></a>
@@ -92,8 +92,6 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 
 ## 📦 Installation
 
-Stabilize ORM requires a modern JavaScript runtime (Bun v1.3+).
-
 ```bash
 # Using Bun
 bun add stabilize-orm
@@ -101,6 +99,35 @@ bun add stabilize-orm
 # Using npm
 npm install stabilize-orm
 ```
+
+---
+
+## 🧩 Runtimes
+
+Stabilize runs on both Bun and Node.js. The package is one build; the SQLite
+driver is selected at runtime, so nothing in your code changes between them.
+
+| Runtime | Version | SQLite driver | Everything else |
+| --- | --- | --- | --- |
+| Bun | 1.3+ | `bun:sqlite` (built in) | ✅ |
+| Node.js | 22.13+ | `node:sqlite` (built in) | ✅ |
+
+PostgreSQL, MySQL/MariaDB, SQL Server and MongoDB need no built-in driver: they
+run on either runtime through their own npm packages. **SQLite on Node.js needs
+Node 22.13 or later**, where `node:sqlite` is available without a flag (it was
+introduced in 22.5 behind one). Nothing has to be installed for it either way.
+
+### Integers past 2^53
+
+SQLite stores 64-bit integers, which is more than a JavaScript `number` can hold
+exactly. On Node.js a value beyond `Number.MAX_SAFE_INTEGER` is returned as a
+**`bigint`**, so it comes back correct rather than rounded. Values within the safe
+range stay plain `number`s on both runtimes, so ordinary `id` columns behave
+identically.
+
+`bun:sqlite` has no equivalent escape hatch and returns such values as a lossy
+`number`. If you store integers that large, read them on Node.js, or keep them
+under 2^53.
 
 ---
 

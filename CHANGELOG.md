@@ -4,7 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Further features and improvements coming soon.
+### Fixed
+
+- **The package would not load on Node.js at all.** `client.ts` carried a static `import { Database, Statement } from "bun:sqlite"`, and `bun:sqlite` is a Bun-only builtin. The bundler inlined it, so `dist/index.js` contained a `bun:` specifier that Node's ESM loader rejects with `ERR_UNSUPPORTED_ESM_URL_SCHEME` — at import time, before a single connection was opened. PostgreSQL, MySQL, SQL Server and MongoDB were all unreachable on Node because of a SQLite import. SQLite now resolves its driver at runtime, in a new `sqlite-driver.ts`: `bun:sqlite` where it exists, `node:sqlite` otherwise, and a `SQLITE_DRIVER_MISSING` error naming both if neither loads. The resolution is synchronous — `createRequire` in a try/catch — so `initializeClient` and the `DBClient` constructor keep their signatures.
+
+### Added
+
+- **SQLite on Node.js**, through the built-in `node:sqlite` (Node 22.13+, no flag). `DatabaseSync` has no `run()`, no `query()` and no `transaction()`, so the adapter supplies the first and the ORM already drove transactions with explicit `BEGIN`/`COMMIT`.
+- **Integers beyond 2^53 come back exact on Node.js.** `bun:sqlite` returns a lossy `number` for them; Node's driver throws `ERR_OUT_OF_RANGE`. The adapter catches that, flips the statement to bigint reads and retries once, so an out-of-range value arrives as a `bigint` instead of a corrupted number. Values within the safe range stay plain `number`s on both runtimes — `setReadBigInts` is per-statement and all-or-nothing, so enabling it up front would have turned every `id` column into a bigint on Node alone.
+
+### Changed
+
+- **The published bundle is built with `--target node`.** It was `--target bun`, which inlines CommonJS dependencies with a Bun-only interop helper: `require("events")` inside ioredis compiled to `n("events")`, undefined once Node loaded the ESM output. `--target node` fixes it and Bun runs the result unchanged.
+- **`engines.node` is `>=22.13.0`**, where it claimed `>=18.0.0`. `node:sqlite` does not exist in 18 or 20, and the package only loaded at all on Node because releases from 22.7 auto-detect ESM syntax in a `.js` file. The claim was never true.
+- **The description no longer claims Deno.** It was unverified; nothing in this project tests it.
+
 
 ## [3.1.0] - 2026-09-16
 

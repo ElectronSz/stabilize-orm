@@ -1,7 +1,85 @@
 # TODO
 
 Ordered by dependency. `stabilize-orm@3.1.0` and `stabilize-cli@3.1.0` are both
-published; everything below is what remains.
+published; everything below is what remains. The cross-runtime work in the first
+section is **done and verified but not yet published** — it needs a version
+number confirmed before `npm publish`, because a published version can never be
+reused.
+
+## Cross-runtime: the package loads on Node now
+
+- [x] **`import { Stabilize } from "stabilize-orm"` threw on Node.** `client.ts`
+      carried a static `import { Database, Statement } from "bun:sqlite"`, and
+      `bun:sqlite` is a Bun-only builtin. The bundler inlined it, so
+      `dist/index.js` held a `bun:` specifier that Node's ESM loader rejects with
+      `ERR_UNSUPPORTED_ESM_URL_SCHEME` — at import time, before any connection
+      opened. **PostgreSQL, MySQL, SQL Server and MongoDB were all unreachable on
+      Node because of a SQLite import.** The coupling turned out to be one import
+      and five call sites, all in `client.ts`: `bun:sqlite` was the only `bun:`
+      reference in the tree and no `Bun.*` global was used anywhere.
+- [x] **A second defect underneath the first: `--target bun`.** Fixing the import
+      was not enough — the bundle still failed to load with `n is not a function`.
+      `--target bun` inlines CommonJS dependencies with a Bun-only interop
+      helper, and ioredis's `require("events")` compiled to `n("events")`, which
+      is undefined once Node loads the ESM output. `--target node` is the fix and
+      Bun runs the result unchanged. Isolated by building three variants against
+      the same source: `--target node` with and without the sqlite externals both
+      loaded (27 exports), `--target bun` failed. The externals were never
+      load-bearing.
+- [x] **`sqlite-driver.ts` resolves the driver at runtime.** `bun:sqlite` and
+      `node:sqlite` each exist on exactly one runtime, so this cannot be one
+      portable driver — it is two implementations behind one class. Resolution is
+      synchronous (`createRequire(import.meta.url)` in a try/catch, each failure
+      catchable), so `initializeClient` and the `DBClient` constructor keep their
+      signatures; making it async would have rippled through every caller and
+      undone the explicit reasoning about the MSSQL path. `SQLiteConnection` is a
+      class, not a factory, because the client identifies its SQLite branch with
+      `instanceof` in five places. `SQLiteStatement` is structural — a driver type
+      in a public signature would make every consumer resolve a driver it may not
+      run on, the same reasoning as `MSSQLHandle`/`MongoHandle`.
+- [x] **Node's `DatabaseSync` deltas absorbed.** No `run()`, no `query()`, no
+      `transaction()`. The first is supplied by the adapter; the third was never
+      used, because the ORM already drives transactions with explicit
+      `BEGIN`/`COMMIT`. `bun:sqlite` needs `{ create: true }` for a missing file
+      and `node:sqlite` creates one on open with no such option, so `options` is
+      Bun-only and is not passed on the Node path.
+- [x] **Integers past 2^53 are exact on Node.** `setReadBigInts` is
+      per-statement and **all-or-nothing** — probed, not assumed: turning it on
+      up front would make every `id` column a bigint on Node while Bun kept
+      returning numbers, a divergence on every row to cover a rare case. Instead
+      the adapter leaves the driver at its default and catches
+      `ERR_OUT_OF_RANGE` on the read, flips that one statement and retries.
+      In range → `number`, identical to Bun; out of range → `bigint`, exact,
+      where Bun silently returns a corrupted number. Documented in the README.
+      Bun's truncation is left alone — it is `bun:sqlite`'s behaviour and cannot
+      be fixed from here.
+- [x] **`engines.node` corrected to `>=22.13.0`.** It claimed `>=18.0.0`, which
+      was never true: `node:sqlite` does not exist in 18 or 20, and the package
+      only loaded at all on Node because releases from 22.7 auto-detect ESM
+      syntax in a `.js` file that has no `"type": "module"`. The description's
+      unverified **Deno** claim is gone too.
+- [x] **`scripts/verify-node-sqlite.mjs`** — the check that found the defect and
+      the one that proves the fix. 15 checks against the **packed tarball**, run
+      under both runtimes: dynamic import, `autoMigrate` (DDL plus `PRAGMA`
+      introspection), `last_insert_rowid`, find, optimistic lock, count/findBy,
+      JSON-as-text, upsert inside the SQLite transaction path, rollback, commit,
+      delete, creating a missing file, reopening an existing one, and both
+      integer cases. A symlinked `node_modules` is exactly how this class of
+      defect stays hidden, so it must always run against the tarball.
+- [x] **Gates.** `bun tsc --noEmit` clean; `bun test` **616 pass / 0 fail**
+      across 33 files, matching baseline exactly — the existing SQLite suites are
+      the proof the Bun path did not move, since the adapter is a passthrough
+      there; build clean; no static `bun:` specifier in `dist/*.js` (the only
+      occurrences are the string literal handed to `createRequire` and the error
+      message text); no driver type in any published `.d.ts`
+      (`dist/sqlite-driver.d.ts` has no imports at all, and both `DatabaseSync`
+      mentions are inside doc comments). Packed tarball: **Node 15/0, Bun 14/0**
+      plus an honest note that `bun:sqlite` reads `9007199254740993` back as
+      `9007199254740992`.
+- [ ] **Not published yet.** Needs a version confirmed out loud first.
+- [ ] **The README edit needs its own release to reach the npm package page** —
+      same constraint as the validation-list item below. Deno is also still
+      unverified rather than disproven; nothing here tests it either way.
 
 ## Docs brought in line with the code
 
@@ -203,6 +281,16 @@ Committed as `acd07a8` and published. 616 tests pass / 0 fail across 33 files,
       SQL Server and now SQLite hand back the text the ORM wrote. The ORM never
       calls `JSON.parse` on load. Unifying it touches four read paths and the two
       tests that assert the asymmetry today.
+- [ ] **`node:sqlite` returns rows with a null prototype.** `bun:sqlite` returns
+      ordinary objects. `isPlainJsonValue` (`client.ts:123`) decides by
+      prototype, so a row read on Node is a plain JSON value where the same row
+      on Bun is not — a difference in the *input* to that predicate, on every
+      read, that no test currently names. Left alone rather than normalized:
+      normalizing rows on every read would be a real cost paid against a failure
+      nobody has demonstrated, and the checks that would trip over it if it
+      mattered — read-then-write in `update`, the upsert round-trip, the JSON
+      column round-trip — all pass on Node (15/0). Flagged as a latent
+      divergence, not a bug.
 - [ ] **The CLI has no `-V, --version`.** `--version` is rejected as an unknown
       option; the version is only visible in the banner and in `info`. Every
       other command has `-h, --help`. Adding `program.version(version)` is one

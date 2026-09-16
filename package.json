@@ -1,7 +1,7 @@
 {
   "name": "stabilize-orm",
   "version": "3.1.0",
-  "description": "A modern, type-safe ORM for Bun, Node.js, and Deno with support for SQLite, MySQL, PostgreSQL, SQL Server and MongoDB, Redis caching, optimistic locking, cursor pagination, and a full-featured query builder.",
+  "description": "A modern, type-safe ORM for Bun and Node.js with support for SQLite, MySQL, PostgreSQL, SQL Server and MongoDB, Redis caching, optimistic locking, cursor pagination, and a full-featured query builder.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -65,7 +65,7 @@
   ],
   "scripts": {
     "build": "bun run build:js && bun run build:types",
-    "build:js": "bun build index.ts repository.ts query-builder.ts client.ts cache.ts model.ts types.ts hooks.ts logger.ts migrations.ts auto-migrate.ts mongo-query.ts mongo-repository.ts mongo-schema.ts mongo-migrate.ts stabilize-kv.ts utils/encryption.ts --outdir dist --target bun --sourcemap=external --minify --external mongodb",
+    "build:js": "bun build index.ts repository.ts query-builder.ts client.ts cache.ts model.ts types.ts hooks.ts logger.ts migrations.ts auto-migrate.ts mongo-query.ts mongo-repository.ts mongo-schema.ts mongo-migrate.ts stabilize-kv.ts utils/encryption.ts --outdir dist --target node --sourcemap=external --minify --external mongodb --external bun:sqlite --external node:sqlite",
     "build:types": "bun tsc -p tsconfig.build.json",
     "prepublishOnly": "bun run build",
     "typecheck": "bun tsc --noEmit",
@@ -120,6 +120,7 @@
     }
   },
   "devDependencies": {
+    "@types/node": "^24.7.2",
     "@types/pg": "^8.15.5",
     "@types/uuid": "^11.0.0",
     "@typescript-eslint/eslint-plugin": "^8.46.1",
@@ -139,7 +140,7 @@
   },
   "homepage": "https://github.com/ElectronSz/stabilize-orm#readme",
   "engines": {
-    "node": ">=18.0.0",
+    "node": ">=22.13.0",
     "bun": ">=1.0.0"
   },
   "sideEffects": false
