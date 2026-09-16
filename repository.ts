@@ -5,7 +5,8 @@
  */
 
 import { Cache } from "./cache";
-import { DBClient } from "./client";
+import { DBClient, isPlainJsonValue } from "./client";
+import { resolveDecimalCapacity } from "./migrations";
 import { StabilizeLogger, type Logger } from "./logger";
 import { QueryBuilder } from "./query-builder";
 import {
@@ -78,9 +79,18 @@ const RELATION_BATCH_SIZE = 500;
  * second-resolution by default anyway, so nothing is lost in the slice.
  *
  * Booleans become 1/0 because none of the dialects the library supports has a
- * real boolean parameter type, and anything else that is not directly bindable
- * (an object, a function) becomes NULL rather than reaching the driver and
- * failing the statement.
+ * real boolean parameter type.
+ *
+ * A plain object or array becomes its JSON text. It used to become NULL, which
+ * silently deleted the value on every backend: `writeHistory` runs every column
+ * through this function, so a versioned model's `JSON` column was stored as
+ * NULL in the history table even on MySQL, where the live row kept it. Encoding
+ * it here rather than letting the driver decide is also what makes SQLite work
+ * at all — `bun:sqlite` binds an object as NULL and throws outright on an
+ * array.
+ *
+ * Anything still unbindable after that — a function, a class instance — becomes
+ * NULL rather than reaching the driver and failing the statement.
  *
  * @param val The value to coerce.
  * @param dbType The dialect the value is bound for.
@@ -91,6 +101,7 @@ function sanitizeSqlValue(
   dbType: DBType,
 ): string | number | boolean | bigint | null {
   if (val === undefined) return null;
+  if (isPlainJsonValue(val)) return JSON.stringify(val);
   if (val instanceof Date) {
     if (dbType === DBType.MySQL) {
       return val.toISOString().slice(0, 19).replace("T", " ");
@@ -104,6 +115,58 @@ function sanitizeSqlValue(
     typeof val === "bigint"
   )
     return val;
+  return null;
+}
+
+/**
+ * Checks a number against a `DECIMAL(precision, scale)` declaration.
+ *
+ * Returns a description of the violation, or `null` when the value fits.
+ *
+ * The capacity comes from {@link resolveDecimalCapacity}, the same function the
+ * type mapper uses to build the column's DDL. Reading it from anywhere else is
+ * how the two drifted apart once already: a column typed `DECIMAL(5,2)` whose
+ * write-time check assumed an undeclared scale of zero rejects its own second
+ * decimal place.
+ *
+ * The fractional half is checked by rounding to the declared scale and
+ * comparing: `Number((0.1).toFixed(2))` is `0.1`, so an ordinary decimal is not
+ * mistaken for one carrying binary-representation noise, while a value that
+ * genuinely needs more places than the column has — `1.005` against a scale of
+ * 2 — no longer compares equal and is reported.
+ *
+ * @param value The value being written.
+ * @param precision The column's declared precision.
+ * @param scale The column's declared scale, if any.
+ * @returns The violation, or `null`.
+ */
+function checkFixedPoint(
+  value: number,
+  precision: number,
+  scale?: number,
+): string | null {
+  if (!Number.isFinite(value)) {
+    return "must be a finite number";
+  }
+
+  const capacity = resolveDecimalCapacity(precision, scale);
+  if (capacity === null) return null;
+
+  const magnitude = Math.abs(value);
+  const rounded = Number(magnitude.toFixed(capacity.scale));
+  if (rounded !== magnitude) {
+    return `has more than ${capacity.scale} decimal place(s)`;
+  }
+
+  // `Math.trunc(0.5)` stringifies as `"0"`, which would count as one integer
+  // digit and reject every value below 1 in a `DECIMAL(2,2)` column.
+  const whole = Math.trunc(rounded).toString();
+  const integerDigits = whole === "0" ? 0 : whole.length;
+  const allowed = capacity.precision - capacity.scale;
+  if (integerDigits > allowed) {
+    return `has more than ${allowed} integer digit(s)`;
+  }
+
   return null;
 }
 
@@ -194,6 +257,10 @@ export class Repository<T> {
       type: string;
       required?: boolean;
       unique?: boolean;
+      /** The column's declared width. @see checkFixedPoint and readWidth */
+      length?: number;
+      precision?: number;
+      scale?: number;
       minLength?: number;
       maxLength?: number;
       pattern?: RegExp;
@@ -247,6 +314,15 @@ export class Repository<T> {
           type: typeof col.type === "string" ? col.type : DataTypes[col.type],
           required: col.required,
           unique: col.unique,
+          // `length`, `precision` and `scale` decide the column's width in DDL
+          // and, where the dialect cannot express that width — Postgres and
+          // SQLite have no bounded string type, SQLite keeps no scale — they
+          // are the only enforcement there is. They have to survive into the
+          // repository for that, which is what these three lines are for: they
+          // were declared on `ColumnConfig` and read by nothing at all.
+          length: col.length,
+          precision: col.precision,
+          scale: col.scale,
           minLength: col.minLength,
           maxLength: col.maxLength,
           pattern: col.pattern,
@@ -434,6 +510,14 @@ export class Repository<T> {
 
       if (value === undefined || value === null) continue;
 
+      // `length` and `maxLength` are two names for the same ceiling, and until
+      // now only one of them was ever read. `maxLength` is the validator and
+      // still wins when both are given; `length` is the column's width, so on
+      // its own it has to mean both — otherwise `{ length: 50 }` would narrow
+      // the storage on MySQL while letting a 200-character value through on
+      // Postgres and SQLite, where the type carries no width to narrow.
+      const maxAllowed = column.maxLength ?? column.length ?? null;
+
       if (
         column.minLength &&
         typeof value === "string" &&
@@ -444,14 +528,21 @@ export class Repository<T> {
       }
 
       if (
-        column.maxLength &&
+        maxAllowed !== null &&
         typeof value === "string" &&
-        value.length > column.maxLength
+        value.length > maxAllowed
       ) {
         errors.push(`Field ${key} too long`);
         continue;
       }
 
+      if (column.precision && typeof value === "number") {
+        const error = checkFixedPoint(value, column.precision, column.scale);
+        if (error) {
+          errors.push(`Field ${key} ${error}`);
+          continue;
+        }
+      }
       if (
         column.pattern &&
         typeof value === "string" &&
@@ -2058,19 +2149,32 @@ export class Repository<T> {
   private processForLoad(row: any): any {
     const processed = { ...row };
     for (const [key, col] of Object.entries(this.columns)) {
-      if ((col as any).encrypted && processed[key]) {
-        // A failure here means the key is wrong or the value was tampered
-        // with. Returning `null` instead made both look like an empty field,
-        // so the caller could neither notice nor react.
-        try {
-          processed[key] = decrypt(processed[key]);
-        } catch (error) {
-          throw new StabilizeError(
-            `Failed to decrypt column "${key}": ${(error as Error).message}`,
-            "DECRYPTION_ERROR",
-            error as Error,
-          );
-        }
+      if (!(col as any).encrypted) continue;
+      // Rows arrive keyed by *column* name — the default select is `SELECT *`,
+      // and `tests/renamed-columns.test.ts` pins that: a column declared
+      // `{ name: "first_name" }` reads back as `first_name`. `this.columns` is
+      // keyed by *property* name, with the column name on `col.name`, so
+      // reading `processed[key]` found nothing for any encrypted column that
+      // declares a `name:` and handed back ciphertext. The column name is
+      // preferred here; it falls back to the property name for input that is
+      // already entity-shaped, and the two are equal in the common case.
+      const field =
+        (col as any).name && (col as any).name in processed
+          ? (col as any).name
+          : key;
+      if (!processed[field]) continue;
+
+      // A failure here means the key is wrong or the value was tampered
+      // with. Returning `null` instead made both look like an empty field,
+      // so the caller could neither notice nor react.
+      try {
+        processed[field] = decrypt(processed[field]);
+      } catch (error) {
+        throw new StabilizeError(
+          `Failed to decrypt column "${field}": ${(error as Error).message}`,
+          "DECRYPTION_ERROR",
+          error as Error,
+        );
       }
     }
     return processed;

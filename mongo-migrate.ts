@@ -18,7 +18,7 @@
 
 import { MetadataStorage } from "./model";
 import { DBClient } from "./client";
-import { StabilizeError, type DBConfig, type Migration } from "./types";
+import { StabilizeError, type DBConfig, type Migration, type StabilizeEmitter } from "./types";
 import {
   generateMongoSteps,
   modelUsesGeneratedIds,
@@ -164,16 +164,50 @@ function buildUpSteps(model: any): MongoStep[] {
 }
 
 /**
+ * Reverses one applied migration and removes its ledger entry.
+ *
+ * The SQL path wraps `down` in a transaction. This one cannot, for the reason at
+ * the top of this file — `dropIndexes` and `collMod` are not permitted inside
+ * one. Steps run in order and the ledger entry is deleted only after every one
+ * of them succeeded, so a partial rollback leaves the entry in place and
+ * re-running picks up where it stopped rather than skipping the remainder.
+ *
+ * @param config The database configuration.
+ * @param name The migration's name, as recorded in the ledger.
+ * @param migration The migration to reverse; only its `mongoDown` is read.
+ */
+export async function rollbackMongoMigration(
+  config: DBConfig,
+  name: string,
+  migration: Migration,
+): Promise<void> {
+  const client = new DBClient(config);
+  try {
+    await runSteps(client, migration.mongoDown ?? []);
+    await client.mongoDeleteOne(MONGO_MIGRATIONS_COLLECTION, { _id: name });
+  } finally {
+    await client.close();
+  }
+}
+
+/**
  * Applies every pending migration, recording each in the ledger.
+ *
+ * Fires `migration:start` and `migration:complete` once per migration actually
+ * applied, matching the SQL runner step for step.
  *
  * @param config The database configuration.
  * @param migrations The migrations to apply, in order.
+ * @param events Optional emitter to report on. `Stabilize.migrate` passes the
+ *   ORM's own, which is what puts migrations on the same event stream as
+ *   ordinary queries; called directly, the run is unreported.
  */
 export async function runMongoMigrations(
   config: DBConfig,
   migrations: Migration[],
+  events?: StabilizeEmitter,
 ): Promise<void> {
-  const client = new DBClient(config);
+  const client = new DBClient(config, undefined, null, null, events);
   try {
     for (const [index, migration] of migrations.entries()) {
       const name =
@@ -197,6 +231,13 @@ export async function runMongoMigrations(
         );
       }
 
+      events?.emit("migration:start", {
+        dbType: config.type,
+        name,
+        index,
+        total: migrations.length,
+      });
+
       // Sequentially, and not in a transaction. @see the note at the top.
       await runSteps(client, steps);
 
@@ -208,7 +249,16 @@ export async function runMongoMigrations(
       });
 
       console.log(`Migration ${name} applied successfully.`);
+      events?.emit("migration:complete", {
+        dbType: config.type,
+        name,
+        index,
+        total: migrations.length,
+      });
     }
+  } catch (error) {
+    events?.emit("error", { dbType: config.type, phase: "migration", error });
+    throw error;
   } finally {
     await client.close();
   }

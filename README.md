@@ -44,8 +44,8 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
 - **Lifecycle Hooks**: Define hooks in the model configuration or as class methods for lifecycle events like `beforeCreate`, `afterUpdate`, etc.
 - **Pluggable Logging**: Includes a robust `StabilizeLogger` with support for file-based, rotating logs.
 - **Custom Errors**: `StabilizeError` provides clear, consistent error handling.
-- **Caching Layer**: Optional Redis-backed caching with `cache-aside` and `write-through` strategies.
-- **Column Encryption**: Mark a column with `encrypted: true` to transparently encrypt it on write and decrypt it on read with AES-256-GCM — including for rows served from cache.
+- **Caching Layer**: Optional caching with `cache-aside` and `write-through` strategies — over Redis when `redisUrl` is set, and over `StabilizeKV`, the in-process store, when it is not. The in-process backend is a self-contained key-value store with TTL, metadata and cursors.
+- **Column Encryption**: Mark a column with `encrypted: true` to transparently encrypt it on write and decrypt it on read with AES-256-GCM — including for rows served from cache. The key comes from `ORM_ENCRYPTION_KEY` or a key file, and each value names the key that wrote it, so keys can be rotated one at a time.
 - **Custom Query Scopes**: Define reusable query conditions (scopes) in models for simplified, reusable filtering logic.
 - **Timestamps**: Automatically manage `createdAt` and `updatedAt` columns for tracking record creation and update times.
 - **SQL Default Expressions**: Support database-side default expressions (e.g., `gen_random_uuid()`, `NOW()`) for columns using the `sqlDefault()` helper.
@@ -158,6 +158,7 @@ import dbConfig from "./database";
 
 const cacheConfig: CacheConfig = {
   enabled: process.env.CACHE_ENABLED === "true",
+  // Optional. Without it the cache runs in process — see Caching below.
   redisUrl: process.env.REDIS_URL,
   ttl: 60,
 };
@@ -171,6 +172,51 @@ const loggerConfig: LoggerConfig = {
 
 export const orm = new Stabilize(dbConfig, cacheConfig, loggerConfig);
 ```
+
+### Caching
+
+`CacheConfig.redisUrl` is genuinely optional. With it, the cache is Redis — shared
+between every instance of your application. Without it, the cache runs in process,
+backed by `StabilizeKV`: an in-process key-value store with `get`/`put`/`delete`/`list`,
+`expiration`/`expirationTtl`, metadata and cursor pagination. Its API follows
+Cloudflare Workers KV, so code written against Workers KV works here unchanged.
+
+```typescript
+import { Stabilize, StabilizeKV } from "stabilize-orm";
+
+// Shared: any number of servers see the same cache.
+const shared = new Stabilize(dbConfig, {
+  enabled: true,
+  ttl: 60,
+  redisUrl: process.env.REDIS_URL,
+});
+
+// In process: no Redis to run, and the cache dies with the process. Right for
+// a single-server app, a test suite and local development — wrong for a fleet,
+// where each instance would hold its own copy and an invalidation on one would
+// leave the others stale.
+const local = new Stabilize(dbConfig, { enabled: true, ttl: 60, maxEntries: 5000 });
+```
+
+`cache.get()`, `set()`, `invalidate()`, `invalidatePattern()` (Redis-style globs
+— `user:*`, `user:?`, `user:[0-9]`), `getStats()` and `disconnect()` behave
+identically on both. Which store is live is reported rather than left to be
+guessed, so a misconfigured deployment is visible:
+
+```typescript
+await orm.getCacheStats();
+// { hits: 12, misses: 3, keys: 40, backend: "memory" }
+
+await orm.healthCheck();
+// { status: "healthy", database: "postgres", latencyMs: 1.2, cacheStatus: "in-memory" }
+```
+
+`backend` is `"redis"`, `"memory"` or `"disabled"`. `"redis"` reports the
+configuration, not the connection — `ioredis` connects lazily, and a failed
+round trip surfaces as `cacheStatus: "unknown"` from `healthCheck()`.
+
+`StabilizeKV` is exported on its own too, for a single-process app that wants a
+KV store with TTL, metadata and cursors without running one.
 
 ---
 
@@ -421,7 +467,7 @@ const User = defineModel({
 
 await userRepository.create({
   email: "lwazicd@icloud.com",
-  nationalId: "9001015800085", // stored as v2:<iv>:<tag>:<ciphertext>
+  nationalId: "9001015800085", // stored as v3:<keyId>:<iv>:<tag>:<ciphertext>
 });
 
 const user = await userRepository.findOne(1);
@@ -430,30 +476,87 @@ console.log(user.nationalId); // "9001015800085" — decrypted on read
 
 Encryption uses AES-256-GCM, so a value that has been tampered with or truncated
 fails to decrypt rather than quietly returning corrupted plaintext. Values carry
-a `v2:` prefix that identifies the format. Encrypted columns are also decrypted
-when a row is served from cache, so a cache hit returns the same shape as a miss.
+a `v3:` prefix followed by a short id for the key that wrote them — see
+[Rotating a key](#rotating-a-key). Encrypted columns are also decrypted when a
+row is served from cache, so a cache hit returns the same shape as a miss.
+
+A column can be encrypted *and* renamed. `{ name: "diagnosis_code", encrypted: true }`
+stores ciphertext in `diagnosis_code` and, as with any renamed column, the value
+reads back under the column name.
 
 ### The encryption key
 
-The key is read from the `ORM_ENCRYPTION_KEY` environment variable on every call,
-so it can be set after your modules are imported:
+The key is looked for in this order, and the first source that yields one wins:
+
+| Source | |
+|---|---|
+| `ORM_ENCRYPTION_KEY` | 32 bytes, as 64 hex characters or as raw UTF-8 |
+| `ORM_ENCRYPTION_KEY_FILE` | a path, defaulting to `.stabilize/encryption.key` |
+
+Both are read on every call, so either can be set after your modules are
+imported.
 
 ```bash
-# 32 bytes, or 64 hex characters
+# Supply it yourself — the right choice wherever the filesystem is ephemeral.
 export ORM_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 ```
 
-There is deliberately no default. **If `ORM_ENCRYPTION_KEY` is unset, reading or
-writing an encrypted column throws** rather than falling back to a built-in key.
-Earlier versions did fall back to a constant compiled into the package, which
-meant a deployment that never set the variable encrypted its columns with a value
-anyone who read the published source could reproduce. Failing loudly is the
-intended behaviour: it is a deployment mistake, not a runtime condition.
+**If neither is present, a key is generated and written to the key file** with
+mode `0600`, and a warning is emitted naming the path. That is safe only because
+the key is stored before it is used: a key generated in memory and never written
+down would orphan every encrypted value at the next restart, leaving ciphertext
+in the database that nothing can ever read. If the file cannot be created — a
+read-only filesystem, a directory the process may not write — the call throws
+rather than inventing a key it cannot keep.
 
-If you have data written by one of those earlier versions, set the key to the
-legacy value `f71a3c8e9b12d5a49c0a3f98b1f2e46d` to keep reading it, then re-save
-those rows under a key of your own. Those rows use AES-CBC and are still read
-correctly; everything newly written uses GCM.
+There is deliberately no built-in key. Earlier versions fell back to a constant
+compiled into the package, so a deployment that never set the variable encrypted
+its columns with a value anyone who read the published source could reproduce.
+Those rows are still readable; see [Rotating a key](#rotating-a-key).
+
+> **The generated key file has to survive a redeploy.** On a host with an
+> ephemeral filesystem it will not, and the redeploy that discards it is the one
+> that loses the data. Set `ORM_ENCRYPTION_KEY` there. Add `.stabilize/` to your
+> `.gitignore` — committing the key hands over every encrypted column.
+
+### Rotating a key
+
+Because each value names the key that wrote it, a new key can be introduced
+without re-encrypting everything at once. Retired keys keep decrypting; only the
+active key encrypts.
+
+```jsonc
+// .stabilize/encryption.key
+{
+  "active": "<the new 64-hex key>",
+  "retired": ["<the previous 64-hex key>"]
+}
+```
+
+Retired keys can also come from `ORM_ENCRYPTION_KEYS_OLD`, comma-separated, for
+a deployment that keeps its secrets in the environment and has no file:
+
+```bash
+export ORM_ENCRYPTION_KEY="<new key>"
+export ORM_ENCRYPTION_KEYS_OLD="<previous key>"
+```
+
+A row still encrypted under a retired key reads normally. Re-save it to move it
+to the active key, then drop the retired key once nothing refers to it — a value
+whose key is missing fails with an error naming the id, so you can tell which key
+is still in use.
+
+`activeKeyId()` returns the id new values are being written with, for checking
+that a rotation has finished.
+
+### Data written by earlier versions
+
+Rows written before key ids existed carry a `v2:` prefix, and rows written before
+that used unauthenticated AES-CBC with an `iv:ciphertext` shape. Neither names a
+key, so both are tried against every key in the ring. If you have data from a
+version that used the built-in constant, put
+`f71a3c8e9b12d5a49c0a3f98b1f2e46d` in `retired`, read those rows, and re-save
+them under a key of your own.
 
 ---
 
@@ -1302,23 +1405,55 @@ const user = await userRepository.lockForUpdate(user.id);
 
 ## 📡 Event Emitter
 
-Subscribe to ORM lifecycle events.
+Subscribe to ORM lifecycle events. All nine are emitted:
 
 ```typescript
 const orm = new Stabilize(dbConfig);
 
-orm.events.on("query", (entry) => {
-  console.log(`[${entry.durationMs}ms] ${entry.query}`);
+orm.events.on("query", ({ dbType, query, params, executionTime }) => {
+  console.log(`[${dbType}] ${executionTime}ms ${query}`);
 });
 
-orm.events.on("error", (err) => {
-  console.error("ORM error:", err);
+orm.events.on("error", ({ phase, error, attempt, attempts }) => {
+  console.error(`ORM error during ${phase} (attempt ${attempt}/${attempts}):`, error);
 });
 
-orm.events.on("connection:open", (dbType) => {
-  console.log(`Connected to ${dbType}`);
+orm.events.on("transaction:start", ({ dbType }) => console.log("begin", dbType));
+orm.events.on("transaction:complete", ({ dbType }) => console.log("commit", dbType));
+orm.events.on("transaction:error", ({ dbType, error }) => console.error("rollback", error));
+
+orm.events.on("migration:start", ({ name, index, total }) => {
+  console.log(`migrating ${index + 1}/${total}: ${name}`);
 });
+orm.events.on("migration:complete", ({ name }) => console.log(`applied ${name}`));
+
+orm.events.on("connection:close", () => console.log("disconnected"));
 ```
+
+| Event | Payload |
+| --- | --- |
+| `query` | `{ dbType, query, params, executionTime }` — every statement, including those run inside a transaction |
+| `error` | `{ dbType, phase, error, attempt, attempts, ... }` — `phase` is `"query"` or `"migration"`; a retried statement reports each attempt |
+| `migration:start` / `migration:complete` | `{ dbType, name, index, total }` — per migration from `migrate()`, per table from `autoMigrate()` |
+| `transaction:start` / `transaction:complete` | `{ dbType }` |
+| `transaction:error` | `{ dbType, error }` |
+| `connection:open` | the `DBType` |
+| `connection:close` | none |
+
+`connection:open` fires from the constructor, before a handler registered
+afterwards could exist. To catch it, build the emitter first and pass it in:
+
+```typescript
+import { Stabilize, StabilizeEmitter } from "stabilize-orm";
+
+const events = new StabilizeEmitter();
+events.on("connection:open", (dbType) => console.log(`Connected to ${dbType}`));
+
+const orm = new Stabilize(dbConfig, { enabled: false, ttl: 60 }, {}, undefined, events);
+```
+
+A handler that throws is swallowed, so one failing subscriber cannot break the
+query that raised the event.
 
 ---
 

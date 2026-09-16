@@ -41,3 +41,11 @@ stabilize-docs/
 
 # The CLI lives in its own repository (ElectronSz/stabilize-cli)
 stabilize-cli/
+
+# The key generated when no ORM_ENCRYPTION_KEY is set. Committing this would
+# hand every encrypted column to anyone who can read the repository.
+.stabilize/
+
+# Editor and agent state: local settings, and worktrees holding whole copies of
+# the tree. Neither is source.
+.claude/

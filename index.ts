@@ -4,6 +4,17 @@
  * @author ElectronSz
  */
 import { Cache } from "./cache";
+import { StabilizeKV } from "./stabilize-kv";
+import type {
+  StabilizeKVOptions,
+  StabilizeKVGetOptions,
+  StabilizeKVPutOptions,
+  StabilizeKVListOptions,
+  StabilizeKVListResult,
+  StabilizeKVKey,
+  StabilizeKVMetadata,
+  StabilizeKVValue,
+} from "./stabilize-kv";
 import { DBClient } from "./client";
 import { type Logger, StabilizeLogger } from "./logger";
 import { QueryBuilder } from "./query-builder";
@@ -14,6 +25,11 @@ import {
   type Migration,
   mapDataTypeToSql,
 } from "./migrations";
+import {
+  generateMongoMigration,
+  rollbackMongoMigration,
+  MONGO_MIGRATIONS_COLLECTION,
+} from "./mongo-migrate";
 import {
   autoMigrate,
   defineSeed,
@@ -59,20 +75,47 @@ export class Stabilize {
   /** Repositories handed out so far, keyed by model. @see getRepository */
   private repositories = new Map<Function, Repository<any>>();
 
+  /**
+   * @param config The database configuration.
+   * @param cacheConfig Cache settings. `enabled` with no `redisUrl` falls back
+   *   to an in-process store. @see Cache
+   * @param loggerConfig Logging settings.
+   * @param existingClient A client to build on, for a caller that has one. Its
+   *   emitter is adopted, so events still arrive here.
+   * @param events An emitter to use instead of a fresh one. This is the only
+   *   way to hear `connection:open`: it fires from this constructor, before a
+   *   handler registered on `this.events` afterwards could exist. Build the
+   *   emitter, subscribe, then pass it.
+   */
   constructor(
     config: DBConfig,
     cacheConfig: CacheConfig = { enabled: false, ttl: 60 },
     loggerConfig: LoggerConfig = {},
     existingClient?: DBClient,
+    events?: StabilizeEmitter,
   ) {
     this.logger = new StabilizeLogger(loggerConfig);
-    this.client = existingClient || new DBClient(config, this.logger);
+    // Built before the client, because the client is handed this emitter: every
+    // `query`, `error` and `transaction:*` the client fires has to reach a
+    // handler registered here. Each side owning its own emitter meant an `on`
+    // call on the ORM heard only the two connection events.
+    this.events = events ?? new StabilizeEmitter();
+    // A client handed in from outside was built before this instance existed
+    // and may be shared with another one, so it is told to use this emitter
+    // rather than assumed to have it.
+    this.client = existingClient || new DBClient(
+      config,
+      this.logger,
+      null,
+      null,
+      this.events,
+    );
+    if (existingClient) this.client.useEmitter(this.events);
     this.cache = existingClient
       ? null
       : cacheConfig.enabled
         ? new Cache(cacheConfig, this.logger)
         : null;
-    this.events = new StabilizeEmitter();
     this.events.emit("connection:open", config.type);
   }
 
@@ -139,7 +182,16 @@ export class Stabilize {
 
   /**
    * Retrieves statistics from the cache, if it is enabled.
-   * @returns A promise that resolves to an object containing cache hits, misses, and total keys.
+   *
+   * `backend` is reported alongside the counters because the two are easy to
+   * confuse: `enabled: true` with no reachable Redis used to produce a cache
+   * that answered every call with a miss and reported zeros forever, and
+   * nothing in the return value distinguished that from a cold cache.
+   *
+   * @returns A promise that resolves to a `CacheStats` object: hits, misses,
+   *   total keys, and which store answered — `"redis"`, `"memory"` or
+   *   `"disabled"`. `"redis"` reports the configuration, not the connection,
+   *   which `ioredis` opens lazily.
    * @example
    * ```
    * const stats = await stabilize.getCacheStats();
@@ -148,7 +200,7 @@ export class Stabilize {
    */
   async getCacheStats(): Promise<CacheStats> {
     if (!this.cache) {
-      return { hits: 0, misses: 0, keys: 0 };
+      return { hits: 0, misses: 0, keys: 0, backend: "disabled" };
     }
     return this.cache.getStats();
   }
@@ -185,11 +237,20 @@ export class Stabilize {
         ? (await this.client.mongoCommand({ ping: 1 })).ok === 1
         : (await this.client.query("SELECT 1 AS ok")).length > 0;
 
-      const cacheStatus = this.cache
-        ? (await this.cache.get("healthcheck"))
-          ? "connected"
-          : "connected (miss)"
-        : "disabled";
+      // The backend is named rather than reduced to connected-or-not: an
+      // in-process cache has no connection to report, and calling it
+      // "connected" said nothing while looking like an answer. `"redis"` here
+      // still means "configured", not "reachable" — `ioredis` connects lazily,
+      // and a failed round trip surfaces in the catch below as `"unknown"`.
+      const backend = this.cache?.backend ?? "disabled";
+      const cacheStatus =
+        backend === "disabled"
+          ? "disabled"
+          : backend === "memory"
+            ? "in-memory"
+            : (await this.cache!.get("healthcheck"))
+              ? "connected"
+              : "connected (miss)";
       return {
         status: healthy ? "healthy" : "unhealthy",
         database: this.client.config.type,
@@ -217,8 +278,16 @@ export class Stabilize {
     return this.client.queryExec(query, params);
   }
 
+  /**
+   * Applies pending migrations against `config`.
+   *
+   * The ORM's own emitter is handed to the runner, so `migration:start`,
+   * `migration:complete` and the `query` and `transaction:*` events a step
+   * raises all arrive at handlers registered here — not on a second, private
+   * emitter belonging to the connection the runner opens for itself.
+   */
   async migrate(config: DBConfig, migrations: Migration[]) {
-    return runMigrations(config, migrations);
+    return runMigrations(config, migrations, this.events);
   }
 
   async autoMigrate(models: any | any[]) {
@@ -285,6 +354,14 @@ export {
   StabilizeError,
   runMigrations,
   generateMigration,
+  // The MongoDB migration surface. Exported because a migration's Mongo half
+  // rides in `mongoUp`/`mongoDown` rather than in `up`/`down`, so a caller that
+  // generates migrations itself — the CLI does — has no other way to reach it,
+  // and because the ledger's collection name has to agree with the one
+  // `runMongoMigrations` writes to.
+  generateMongoMigration,
+  rollbackMongoMigration,
+  MONGO_MIGRATIONS_COLLECTION,
   defineModel,
   autoMigrate,
   sqlDefault,
@@ -293,6 +370,12 @@ export {
   resetDatabase,
   StabilizeEmitter,
   generateUUID,
+  // The in-process store behind a Cache with no `redisUrl`. Exported because
+  // it is useful on its own — as a key-value store for a single-process app's
+  // own data, or as a test double for code that expects Workers KV, whose API
+  // it follows — and because a caller choosing the memory backend should be
+  // able to read its `maxEntries` and expiry rules rather than infer them.
+  StabilizeKV,
 };
 
 export type {
@@ -318,4 +401,14 @@ export type {
   // entry point.
   Predicate,
   MongoStep,
+  // The shapes a StabilizeKV caller names directly: the two option bags, a key as
+  // `list` reports it, and a page of them.
+  StabilizeKVOptions,
+  StabilizeKVGetOptions,
+  StabilizeKVPutOptions,
+  StabilizeKVListOptions,
+  StabilizeKVListResult,
+  StabilizeKVKey,
+  StabilizeKVMetadata,
+  StabilizeKVValue,
 };

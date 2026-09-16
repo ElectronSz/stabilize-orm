@@ -1,0 +1,218 @@
+# TODO
+
+Ordered by dependency. `stabilize-orm@3.0.0` and `stabilize-cli@3.0.0` are both
+published; everything below is what remains.
+
+## Docs brought in line with the code
+
+- [x] **Every docs page the ORM and CLI changes made stale.** The CLI Reference
+      and CLI API pages said `v2.2.1` and now say `v3.0.0`, with the MongoDB
+      behaviour described per command. The ORM changes had left a wider trail:
+      the `length`/`precision`/`scale` section that said all three do nothing
+      (they now set the width and bound the value), the SQLite "JSON cannot be
+      written as an object" limitation (removed), both `cacheStatus`
+      enumerations, the constructor signature and the `StabilizeEmitter`
+      parameter, the security guide's "only two of nine events fire" box and its
+      "a missing key throws" box, and the hooks example that subscribed to
+      `connection:open` after the constructor that emits it. 16 files;
+      `bunx tsc --noEmit` clean.
+- [x] **The CLI overclaimed what `query` does on MongoDB.** Its README and the
+      3.0.0 changelog entry both said `query` runs document commands. It does
+      not — it warns that there is no SQL to run and points at `db:tables`,
+      `db:table:info` and `db:console`. The source has always said so; only the
+      docs were wrong. Corrected in the repo.
+
+## In progress
+
+- [x] **`length`, `precision` and `scale` did nothing.** All three were declared
+      on `ColumnConfig` and read by no one: the SQL type came from the
+      `DataTypes` member alone, so `{ type: DataTypes.STRING, length: 50 }`
+      emitted `VARCHAR(255)` on MySQL and a 200-character value was stored
+      without complaint. Fixed in three parts — one column-aware type mapper
+      (`mapDataTypeToSql`, now the single implementation the other two delegate
+      to), write-time enforcement in `collectValidationErrors`, and
+      `resolveDecimalCapacity` so the DDL and the check cannot disagree on the
+      scale. `tests/column.capacity.test.ts`.
+- [x] **A JSON object written to SQLite failed.** The object was not encoded on
+      the SQLite path, and `bun:sqlite` binds a plain object as **NULL** —
+      silently — while spreading an array as the parameter list and failing the
+      statement. `bindSQLiteParams` mirrors the MySQL and SQL Server binders.
+      Along the way: `sanitizeSqlValue` was discarding JSON on *every* backend,
+      so a versioned model lost the field in its history table even on MySQL.
+      `tests/sqlite.json.test.ts`.
+- [x] **Seven of the nine declared events were never emitted.** `query`,
+      `error`, `migration:start`, `migration:complete`, `transaction:start`,
+      `transaction:complete` and `transaction:error` now fire, and the two that
+      did — `connection:open`, `connection:close` — were rewired: the client
+      used to build its own emitter, so nothing the client fired ever reached a
+      handler registered on the ORM. `tests/events.test.ts`. Both `stabilize-docs`
+      event pages rewritten: the amber "Only two of these are ever emitted" box
+      and the seven-entry "Declared but never fired" list are gone, replaced by
+      the real payloads, the three `error` phases, `migration:start`'s position,
+      and a note that `connection:open` fires before you can subscribe.
+- [x] **`redisUrl` is not optional in practice.** `CacheConfig.enabled: true`
+      with no `redisUrl` built no client at all, and every method became a
+      silent no-op — `get` returned null, `set` discarded, `getStats` reported
+      zeros forever. You got no error and no caching, only the appearance of it.
+      Fixed with `StabilizeKV`, an in-process key-value store whose API follows
+      Cloudflare Workers KV (`get`/`put`/`delete`/`list`,
+      `expiration`/`expirationTtl`, metadata, cursor pagination, LRU-bounded by
+      `maxEntries`), which `Cache` now uses whenever there is no `redisUrl`.
+      `Cache` was restructured around one `CacheStore` interface so the two
+      backends cannot drift apart method by method. Also: `CacheStats.backend`
+      and a `healthCheck()` that names the backend instead of reporting
+      `in-memory` as `"connected"`. `tests/cache.test.ts`, and the
+      `stabilize-docs` caching page rewritten to match — a new "The In-Process
+      Backend" section stating what `StabilizeKV` is *not* (shared, durable,
+      replicated), the `backend` field, `cacheStatus`, and `maxEntries`.
+- [x] **Renamed the store to `StabilizeKV`.** It was `MemoryKV`, and the README
+      introduced it as "Cloudflare-KV-shaped" — a description standing in for a
+      name. The class, its seven exported types, the source file, the build
+      entry, the `exports` subpath and the docs all say `StabilizeKV` now;
+      Cloudflare Workers KV survives only as a stated influence on the API.
+      Gates rerun: 601 tests pass / 0 fail across 33 files, `tsc --noEmit`
+      clean, build clean, no type leak in `dist/stabilize-kv.d.ts`.
+
+- [x] **The encryption key had to be supplied, and could not be rotated.**
+      `ORM_ENCRYPTION_KEY` was the only source, and the ciphertext format
+      `v2:<iv>:<tag>:<ct>` named no key — so changing the key made every
+      existing row unreadable at once, with no way to hold two side by side.
+      Now a key is looked for in `ORM_ENCRYPTION_KEY`, then a key file
+      (`ORM_ENCRYPTION_KEY_FILE`, default `.stabilize/encryption.key`), which
+      is **generated and stored 0600 when neither is present**. A generated key
+      is written before it is used, and a path that cannot be written is fatal
+      — a key held only in memory would orphan every value it encrypted at the
+      next restart. `ORM_ENCRYPTION_KEYS_OLD` and the file's `retired` list
+      hold keys that still decrypt. The format is now
+      `v3:<keyId>:<iv>:<tag>:<ct>`, where the id is `sha256(key)` truncated —
+      derived, not assigned, so a key moved between env and file keeps its
+      identity and its rows. Legacy `v2:` and CBC values still read, by walking
+      the ring. Also fixed, in the same two methods: **`processForLoad` read
+      the wrong key**, indexing rows by property name while `SELECT *` returns
+      them by column name, so an encrypted column that also declared `name:`
+      was handed back as ciphertext. `.stabilize/` is gitignored.
+      `tests/encryption.test.ts` (25 tests, including the rename case, which
+      was confirmed to fail against the unfixed code).
+
+## Blocked — waiting on something else
+
+- [ ] **Nothing is blocked.** The docs push that was blocked here landed some
+      time ago; the *new* docs changes are in Next, gated on the publish rather
+      than on anything outside this repo.
+
+## Next
+
+- [ ] **Push the docs once the ORM is published.** All the `stabilize-docs`
+      pages are rewritten and typecheck clean — the two event pages, the caching
+      page, the encryption page, and the sixteen files touched for the CLI and
+      the `length`/`precision`/`scale` work. They describe behaviour that is in
+      the working tree but **not on npm yet**, so pushing them ahead of the
+      publish would leave a reader who installs `3.0.0` reading documentation for
+      a version they do not have. Publish first, then push.
+- [ ] **Bump and publish `stabilize-orm`** once the five fixes above are in.
+      Confirm the version number before publishing — a published npm version
+      can never be reused. The changes that can break a working project:
+      - Postgres `DECIMAL` now emits `DECIMAL(10,2)` where it used to emit a bare
+        `DECIMAL`. A bare Postgres `DECIMAL` stores whatever it is handed; the
+        constrained form does not. A regenerated migration narrows the column,
+        and a value over ten digits is now rejected rather than stored.
+      - `length` / `precision` / `scale` are enforced. A column narrower than
+        values already in it now rejects writes that previously succeeded.
+      - `CacheStats` gained a **required** `backend` field.
+      - v3 ciphertext is unreadable by older versions.
+      - A missing encryption key generates one instead of throwing.
+- [ ] **Republish `stabilize-cli` to correct its registry page.** The published
+      3.0.0 tarball ships the README that was committed before the `query`
+      correction, and npm renders that file on the package page. The repo is
+      fixed; the registry still shows the old text until a 3.0.1 goes out. A
+      republish is the only way to change it.
+- [ ] **Decide whether to merge `chages` into `main`.** `chages` is 11 commits
+      ahead of local `main`, and local `main` is 5 behind `origin/main`. The
+      MongoDB backend and the 3.0.0 release exist on `chages` only, so GitHub's
+      default branch has no MongoDB work at all.
+- [ ] **Optionally tag `v3.0.0`.** Tags stop at `1.3.0` — no `v2.x` was ever
+      tagged despite two point releases shipping, so this convention is already
+      inconsistent.
+
+## Then — the CLI
+
+- [x] **M10: MongoDB support in `stabilize-cli`.** Done and verified end to end
+      against the replica set.
+- [x] **The CLI reported a version npm had never published.** Its banner and
+      `diagnose` printed a hard-coded `const version = "2.2.0"` while the
+      manifest said `2.2.1`. The constant is now `pkg.version`, read from
+      `package.json` and inlined by the bundler, so the two cannot drift again.
+      `--help` prints `v2.2.1`.
+- [x] **The CLI's manifest pointed at the wrong repository.**
+      `repository`, `homepage` and `bugs` all said `ElectronSz/stabilize-orm`
+      — so npm's "Repository" link on the package page led to a different
+      project. Now `ElectronSz/stabilize-cli` throughout.
+- [x] **The CLI declared a stale ORM dependency.** `stabilize-orm: ^2.0.0`
+      excludes the 3.0.0 that is installed and published; now `^3.0.0`.
+      `bun test` passes, `tsc --noEmit` clean, build clean.
+- [ ] **Bump and publish `stabilize-cli`.** Separate npm package, currently at
+      2.2.1. Commit first, then confirm the version out loud, then publish.
+- [ ] **Clean the CLI's smoke-test residue** left by verifying M10 — `api/`,
+      `app.db`, `backups/`, `config/`, `migrations/`, `models/`, `seeds/`.
+      Deferred: `config/` was never tracked (`git ls-files config/` is empty and
+      `git log --all -- config/database.ts` is empty), so "restore
+      `config/database.ts`" has no tracked original to restore from. Deciding
+      this and the item below is one decision, not two.
+- [ ] **Decide what to do with the CLI's untracked scratch directories.**
+      `api/`, `app.db`, `backups/`, `config/`, `migrations/`, `models/` and
+      `seeds/` are the CLI's own dogfooding output (generated model stubs, a
+      SQLite file, backup artifacts), not CLI source. They were deliberately left
+      untracked rather than committed or gitignored unilaterally.
+
+## Flagged, deliberately not fixed
+
+- [ ] **SQL `rollback` takes `rows[0]` with no `ORDER BY`** over a non-unique
+      `(id, version)` — a delete records the row's current version, so two
+      history rows can share a number. The two carry identical column values, so
+      no failure scenario could be constructed: fragile, not demonstrably broken.
+- [ ] **A hand-written `qb.lock()` bypasses the warning.** `Repository.lockForUpdate`
+      warns on MongoDB; a `qb.lock()` passed straight to `execute()` is still
+      walked past in silence. Documented in the docblock and README.
+- [ ] **`DataTypes.JSON` reads back asymmetrically.** Postgres and MySQL drivers
+      parse a JSON column into a value; MariaDB (JSON is a `LONGTEXT` alias),
+      SQL Server and now SQLite hand back the text the ORM wrote. The ORM never
+      calls `JSON.parse` on load. Unifying it touches four read paths and the two
+      tests that assert the asymmetry today.
+- [ ] **The CLI has no `-V, --version`.** `--version` is rejected as an unknown
+      option; the version is only visible in the banner and in `info`. Every
+      other command has `-h, --help`. Adding `program.version(version)` is one
+      line, but it is a new flag rather than a fix, so it is flagged rather than
+      added unilaterally.
+
+## Done
+
+- [x] **Key generation verified end to end.** In a clean directory with no
+      `ORM_ENCRYPTION_KEY` and no key file, the first `encrypt()` call created
+      `.stabilize/encryption.key` containing
+      `{"active": "<64 hex>", "retired": []}`, emitted the
+      `STABILIZE_ENCRYPTION_KEY_GENERATED` warning, and round-tripped its
+      ciphertext back to the original value. The id inside the ciphertext
+      matched `activeKeyId()`. Two caveats worth knowing: generation is **lazy**
+      — it happens on first use, not at `npm install` — and the file's mode is
+      `0600` only where the filesystem honours POSIX mode bits. On Windows it
+      lands as `0644`, so the file is exactly as private as its directory.
+- [x] Docs homepage and MongoDB page brought up to date, pushed to
+      `github.com/ElectronSz/stabilize-docs`. Includes the Next.js 15.5.25
+      upgrade, rebased onto Vercel's own CVE fix.
+- [x] MongoDB backend, milestones M5–M9: write path, relations, versioning,
+      escape hatches. 528 tests pass / 0 fail, 29 files.
+- [x] `aggregate()` on an empty collection — `$group` over no input yields no
+      document, so the count came back `undefined` rather than `0`.
+- [x] Delete journalling on MongoDB — recording the row's current version
+      collided with the row it was journalling (version is half the compound
+      `_id`) and failed the delete it was meant to record.
+- [x] `lockForUpdate` now warns instead of silently taking no lock.
+- [x] `stabilize-orm@3.0.0` published and verified on the registry.
+- [x] `stabilize-cli@2.2.1` source recovered into git (`f96cda6`) and pushed —
+      it had been live on npm while sitting in no commit at all.
+- [x] `stabilize-cli` **untracked** from the ORM repo (`f6f9fe2`). It was briefly
+      a real submodule (`4cdc64b`), then reverted: the pointer only ever recorded
+      a commit already pushed to the CLI's own remote, so it cost a second commit
+      per CLI change for no gain. The directory is now gitignored, matching how
+      `stabilize-docs` is handled.
+- [x] `chages` pushed to GitHub through `4cdc64b`.

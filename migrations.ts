@@ -13,8 +13,12 @@ import {
   StabilizeError,
   DBType,
   DataTypes,
+  StabilizeEmitter,
 } from "./types";
-import { runMongoMigrations } from "./mongo-migrate";
+import {
+  generateMongoMigration,
+  runMongoMigrations,
+} from "./mongo-migrate";
 
 /**
  * Quotes an identifier for the target dialect.
@@ -138,12 +142,93 @@ export function createIndexIfNotExistsSQL(
 }
 
 /**
+ * Reads a declared width, rejecting anything that is not a usable column width.
+ *
+ * `0`, a negative number, a fraction and `NaN` are all silently ignored rather
+ * than interpolated into DDL — a `VARCHAR(NaN)` is a syntax error the caller
+ * would see only when the migration ran, far from the model that caused it.
+ *
+ * @param value The declared option.
+ * @returns The width, or `null` when the option is absent or unusable.
+ */
+function readWidth(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    return null;
+  }
+  return value;
+}
+
+/**
+ * The scale to pair with a precision, clamped to something the DDL accepts.
+ *
+ * A scale above the precision (`DECIMAL(2,5)`) is rejected by every dialect, so
+ * it falls back to the absent default rather than emitting a statement the
+ * server refuses.
+ *
+ * @param scale The declared scale.
+ * @param precision The precision it must fit inside.
+ * @returns The scale, or `null` when the option is absent or unusable.
+ */
+function readScale(scale: unknown, precision: number): number | null {
+  if (typeof scale !== "number" || !Number.isInteger(scale) || scale < 0) {
+    return null;
+  }
+  return scale > precision ? null : scale;
+}
+
+/**
+ * The precision and scale a `DECIMAL` column is actually declared with.
+ *
+ * Exported because the DDL and the check that runs on every write have to agree
+ * on one number. They did not: the type mapper clamped an undeclared scale to
+ * `min(2, precision)` while the repository assumed a scale of `0`, so a column
+ * typed `DECIMAL(5,2)` would have rejected its own second decimal place.
+ *
+ * @param precision The declared precision, if any.
+ * @param scale The declared scale, if any.
+ * @returns The pair, or `null` when no precision was declared.
+ */
+export function resolveDecimalCapacity(
+  precision?: number,
+  scale?: number,
+): { precision: number; scale: number } | null {
+  const places = readWidth(precision);
+  if (places === null) return null;
+  // `DECIMAL(1,2)` is rejected by every server, so the library's usual scale of
+  // 2 shrinks to fit a narrow precision rather than being applied blindly.
+  return { precision: places, scale: readScale(scale, places) ?? Math.min(2, places) };
+}
+
+/**
  * Maps an abstract data type to the correct SQL type string for the specified database dialect.
+ *
+ * The optional third argument is what makes `length`, `precision` and `scale`
+ * mean anything. Every mapper in this library used to take the type alone, so a
+ * column's declared width was unreachable from the one place that could express
+ * it — `{ type: DataTypes.STRING, length: 50 }` emitted `VARCHAR(255)`, and the
+ * server then accepted a 200-character value the model said was too long.
+ *
+ * The parameter is optional and the derivation is applied only when it is
+ * present, so the no-options output of this function is byte-for-byte what it
+ * has always been. Every existing assertion in `tests/mssql.dialect.test.ts`
+ * and `tests/migrations.test.ts` depends on that.
+ *
+ * Where a dialect cannot express the constraint the declared type is returned
+ * unchanged — Postgres `TEXT` has no width, and SQLite's `NUMERIC` neither
+ * stores nor enforces a scale — because emitting `VARCHAR(50)` there would
+ * claim an enforcement that does not exist. Those two are covered by the
+ * in-process checks in `collectValidationErrors` instead.
+ *
  * @param dt The data type to map.
  * @param dbType The target database dialect.
+ * @param column The column's declared options, if the caller has them.
  * @returns The SQL column type string.
  */
-function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
+function mapDataTypeToSql(
+  dt: DataTypes | string,
+  dbType: DBType,
+  column?: { length?: number; precision?: number; scale?: number },
+): string {
   let type: string;
   if (typeof dt === "string") {
     type = dt.toLowerCase();
@@ -151,9 +236,20 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
     type = DataTypes[dt].toLowerCase();
   }
 
+  const width = readWidth(column?.length);
+  // A single-precision column takes a *bit* width, which is what `precision`
+  // means on `FLOAT` — not the digit count it means on `DECIMAL`.
+  const floatWidth = readWidth(column?.precision);
+  const decimal = resolveDecimalCapacity(column?.precision, column?.scale);
+  const decimalPrecision = decimal?.precision ?? 10;
+  const decimalScale = decimal?.scale ?? 2;
+
   if (dbType === DBType.Postgres) {
     switch (type) {
       case "string":
+        // `TEXT` and `VARCHAR(n)` are the same type in Postgres, with no
+        // performance difference, so there is nothing for `length` to buy here.
+        // The limit is enforced in process instead. @see collectValidationErrors
         return "TEXT";
       case "text":
         return "TEXT";
@@ -166,7 +262,13 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
       case "double":
         return "DOUBLE PRECISION";
       case "decimal":
-        return "DECIMAL";
+        // A bare `DECIMAL` in Postgres is unconstrained — it stores whatever it
+        // is handed — so an undeclared precision means `DECIMAL(10,2)`, which is
+        // what MySQL and SQL Server have always emitted and what
+        // `auto-migrate.ts`'s own `mapType` emitted for Postgres too. The two
+        // mappers disagreed on this one cell; they now agree on the constrained
+        // form rather than on the one that enforces nothing.
+        return `DECIMAL(${decimalPrecision},${decimalScale})`;
       case "boolean":
         return "BOOLEAN";
       case "date":
@@ -186,7 +288,7 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
   if (dbType === DBType.MySQL) {
     switch (type) {
       case "string":
-        return "VARCHAR(255)";
+        return width === null ? "VARCHAR(255)" : `VARCHAR(${width})`;
       case "text":
         return "TEXT";
       case "integer":
@@ -194,11 +296,14 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
       case "bigint":
         return "BIGINT";
       case "float":
-        return "FLOAT";
+        // MySQL is the one dialect where a single-precision column takes a
+        // bit-width, so a declared precision is expressible rather than rounded
+        // away.
+        return floatWidth === null ? "FLOAT" : `FLOAT(${floatWidth})`;
       case "double":
         return "DOUBLE";
       case "decimal":
-        return "DECIMAL(10,2)";
+        return `DECIMAL(${decimalPrecision},${decimalScale})`;
       case "boolean":
         return "TINYINT(1)";
       case "date":
@@ -218,7 +323,7 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
   if (dbType === DBType.MSSQL) {
     switch (type) {
       case "string":
-        return "NVARCHAR(255)";
+        return width === null ? "NVARCHAR(255)" : `NVARCHAR(${width})`;
       case "text":
         return "NVARCHAR(MAX)";
       case "integer":
@@ -230,7 +335,7 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
       case "double":
         return "FLOAT";
       case "decimal":
-        return "DECIMAL(10,2)";
+        return `DECIMAL(${decimalPrecision},${decimalScale})`;
       case "boolean":
         return "BIT";
       case "date":
@@ -248,6 +353,11 @@ function mapDataTypeToSql(dt: DataTypes | string, dbType: DBType): string {
     }
   }
   if (dbType === DBType.SQLite) {
+    // SQLite is dynamically typed: a column's declared type is a hint that
+    // decides type affinity, not a constraint the value is checked against, and
+    // `NUMERIC` keeps no scale. `length` and `precision` are therefore ignored
+    // here rather than written into DDL that would read as enforcement and
+    // behave as decoration. @see collectValidationErrors for where they apply.
     switch (type) {
       case "string":
         return "TEXT";
@@ -314,6 +424,16 @@ export async function generateMigration(
   name: string,
   dbType: DBType,
 ): Promise<Migration> {
+  // Branched before any SQL is built. Every mapper below — `mapDataTypeToSql`,
+  // `getAutoIncrementPK`, `createTableIfNotExistsSQL` — answers for a dialect
+  // that has DDL, and MongoDB has none: a collection is created with a command
+  // and described by a validator. Without this the Mongo half of the ORM could
+  // run a migration but never generate one, so `migrate:auto` was reachable and
+  // `generate:migration` was not.
+  if (dbType === DBType.MongoDB) {
+    return generateMongoMigration(model, name);
+  }
+
   const tableName = MetadataStorage.getTableName(model);
   if (!tableName) {
     throw new StabilizeError(
@@ -358,7 +478,9 @@ export async function generateMigration(
       }
     } else {
       defParts.push(col.name || key);
-      defParts.push(mapDataTypeToSql(col.type, dbType));
+      // The column is passed, not just its type: `length`, `precision` and
+      // `scale` live on the column and are what decide the width above.
+      defParts.push(mapDataTypeToSql(col.type, dbType, col));
 
       if (validators[key]?.includes("required")) {
         defParts.push("NOT NULL");
@@ -522,18 +644,30 @@ function getMigrationsTableSQL(dbType: DBType): string {
 
 /**
  * Connects to the database and runs all pending migrations.
+ *
+ * Fires `migration:start` and `migration:complete` once per migration actually
+ * applied, and emits on the client it opens — so a `query` or `transaction:*`
+ * raised by a migration step reaches the same listeners.
+ *
  * @param config The database configuration object.
  * @param migrations An array of `Migration` objects to be executed.
+ * @param events Optional emitter to report on. `Stabilize.migrate` passes the
+ *   ORM's own, which is what puts migrations on the same event stream as
+ *   ordinary queries; called directly, the run is unreported.
  */
-export async function runMigrations(config: DBConfig, migrations: Migration[]) {
+export async function runMigrations(
+  config: DBConfig,
+  migrations: Migration[],
+  events?: StabilizeEmitter,
+) {
   // Branched before `getMigrationsTableSQL` can be asked about a dialect it has
   // no answer for: there is no `CREATE TABLE` here, and a migration's Mongo
   // half rides in `mongoUp`/`mongoDown` rather than in `up`/`down`.
   if (config.type === DBType.MongoDB) {
-    return runMongoMigrations(config, migrations);
+    return runMongoMigrations(config, migrations, events);
   }
 
-  const client = new DBClient(config);
+  const client = new DBClient(config, undefined, null, null, events);
   try {
     const dbType = config.type;
     await client.query(getMigrationsTableSQL(dbType));
@@ -549,6 +683,15 @@ export async function runMigrations(config: DBConfig, migrations: Migration[]) {
       const applied = await client.query<{ id: number }>(selectQuery, [name]);
 
       if (applied.length === 0) {
+        // Per migration rather than per run, and with its position, so a
+        // listener can show progress through a long list instead of a single
+        // start and a single end it cannot attribute to anything.
+        events?.emit("migration:start", {
+          dbType,
+          name,
+          index,
+          total: migrations.length,
+        });
         await client.transaction(async (txClient) => {
           console.log(`Applying migration: ${name}...`);
           for (const query of migration.up) {
@@ -574,9 +717,19 @@ export async function runMigrations(config: DBConfig, migrations: Migration[]) {
 
           console.log(`Migration ${name} applied successfully.`);
         });
+        events?.emit("migration:complete", {
+          dbType,
+          name,
+          index,
+          total: migrations.length,
+        });
       }
     }
   } catch (error) {
+    // `migration:start` without a matching `migration:complete` is how a
+    // listener sees a failure, so the reason is reported on `error` — the one
+    // event reserved for it — rather than on an invented `migration:error`.
+    events?.emit("error", { dbType: config.type, phase: "migration", error });
     console.error("Migration failed:", error);
     throw error;
   } finally {

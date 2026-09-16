@@ -1,6 +1,6 @@
 {
   "name": "stabilize-orm",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "A modern, type-safe ORM for Bun, Node.js, and Deno with support for SQLite, MySQL, PostgreSQL, SQL Server and MongoDB, Redis caching, optimistic locking, cursor pagination, and a full-featured query builder.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -37,6 +37,10 @@
       "types": "./dist/cache.d.ts",
       "default": "./dist/cache.js"
     },
+    "./stabilize-kv": {
+      "types": "./dist/stabilize-kv.d.ts",
+      "default": "./dist/stabilize-kv.js"
+    },
     "./logger": {
       "types": "./dist/logger.d.ts",
       "default": "./dist/logger.js"
@@ -61,7 +65,7 @@
   ],
   "scripts": {
     "build": "bun run build:js && bun run build:types",
-    "build:js": "bun build index.ts repository.ts query-builder.ts client.ts cache.ts model.ts types.ts hooks.ts logger.ts migrations.ts auto-migrate.ts mongo-query.ts mongo-repository.ts mongo-schema.ts mongo-migrate.ts utils/encryption.ts --outdir dist --target bun --sourcemap=external --minify --external mongodb",
+    "build:js": "bun build index.ts repository.ts query-builder.ts client.ts cache.ts model.ts types.ts hooks.ts logger.ts migrations.ts auto-migrate.ts mongo-query.ts mongo-repository.ts mongo-schema.ts mongo-migrate.ts stabilize-kv.ts utils/encryption.ts --outdir dist --target bun --sourcemap=external --minify --external mongodb",
     "build:types": "bun tsc -p tsconfig.build.json",
     "prepublishOnly": "bun run build",
     "typecheck": "bun tsc --noEmit",

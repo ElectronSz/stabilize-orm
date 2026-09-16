@@ -10,8 +10,20 @@ import { MetadataStorage } from "./model";
 import {
   createIndexIfNotExistsSQL,
   createTableIfNotExistsSQL,
+  mapDataTypeToSql,
   quoteIdentifier,
 } from "./migrations";
+
+/** The `DBType` each dialect name in this file stands for. */
+const DIALECT_DB_TYPES: Record<
+  "sqlite" | "mysql" | "postgres" | "mssql",
+  DBType
+> = {
+  sqlite: DBType.SQLite,
+  mysql: DBType.MySQL,
+  postgres: DBType.Postgres,
+  mssql: DBType.MSSQL,
+};
 import { mongoAutoMigrate } from "./mongo-schema";
 
 async function tableExists(db: DBClient, table: string): Promise<boolean> {
@@ -163,76 +175,27 @@ async function getExistingIndexes(
   return indexes;
 }
 
+/**
+ * Maps a resolved type name to its SQL type for a dialect.
+ *
+ * The four tables this used to hold were, cell for cell, the output of
+ * `mapDataTypeToSql` for the matching dialect — the one exception being
+ * Postgres `DECIMAL`, which this returned as `DECIMAL(10,2)` where the mapper
+ * returned a bare `DECIMAL`. That exception is now the mapper's behaviour too,
+ * so there is one table rather than two that have to be kept in step, and a
+ * column's declared `length`, `precision` and `scale` reach this path at all.
+ *
+ * @param dataType The resolved type name, as `resolveTypeName` returns it.
+ * @param dialect The target dialect.
+ * @param column The column's declared options, if the caller has them.
+ * @returns The SQL column type.
+ */
 function mapType(
-  dataType: string,
+  dataType: DataTypes | string,
   dialect: "sqlite" | "mysql" | "postgres" | "mssql",
+  column?: { length?: number; precision?: number; scale?: number },
 ): string {
-  const t = dataType.toUpperCase();
-  const map: Record<string, Record<string, string>> = {
-    sqlite: {
-      STRING: "TEXT",
-      TEXT: "TEXT",
-      INTEGER: "INTEGER",
-      BIGINT: "INTEGER",
-      FLOAT: "REAL",
-      DOUBLE: "REAL",
-      DECIMAL: "NUMERIC",
-      BOOLEAN: "INTEGER",
-      DATE: "TEXT",
-      DATETIME: "TEXT",
-      JSON: "TEXT",
-      UUID: "TEXT",
-      BLOB: "BLOB",
-    },
-    mysql: {
-      STRING: "VARCHAR(255)",
-      TEXT: "TEXT",
-      INTEGER: "INT",
-      BIGINT: "BIGINT",
-      FLOAT: "FLOAT",
-      DOUBLE: "DOUBLE",
-      DECIMAL: "DECIMAL(10,2)",
-      BOOLEAN: "TINYINT(1)",
-      DATE: "DATE",
-      DATETIME: "DATETIME",
-      JSON: "JSON",
-      UUID: "CHAR(36)",
-      BLOB: "BLOB",
-    },
-    postgres: {
-      STRING: "TEXT",
-      TEXT: "TEXT",
-      INTEGER: "INTEGER",
-      BIGINT: "BIGINT",
-      FLOAT: "REAL",
-      DOUBLE: "DOUBLE PRECISION",
-      DECIMAL: "DECIMAL(10,2)",
-      BOOLEAN: "BOOLEAN",
-      DATE: "DATE",
-      DATETIME: "TIMESTAMP",
-      JSON: "JSONB",
-      UUID: "UUID",
-      BLOB: "BYTEA",
-    },
-    mssql: {
-      STRING: "NVARCHAR(255)",
-      TEXT: "NVARCHAR(MAX)",
-      INTEGER: "INT",
-      BIGINT: "BIGINT",
-      FLOAT: "REAL",
-      DOUBLE: "FLOAT",
-      DECIMAL: "DECIMAL(10,2)",
-      BOOLEAN: "BIT",
-      DATE: "DATE",
-      DATETIME: "DATETIME2",
-      JSON: "NVARCHAR(MAX)",
-      UUID: "UNIQUEIDENTIFIER",
-      BLOB: "VARBINARY(MAX)",
-    },
-  };
-  // The fallback is a text column, and T-SQL's `TEXT` is both deprecated and
-  // unusable in most expressions, so SQL Server falls back to `NVARCHAR(MAX)`.
-  return map[dialect]?.[t] || (dialect === "mssql" ? "NVARCHAR(MAX)" : "TEXT");
+  return mapDataTypeToSql(dataType, DIALECT_DB_TYPES[dialect], column);
 }
 
 /**
@@ -311,7 +274,7 @@ export async function autoMigrate(
           ? "mssql"
           : "postgres";
 
-  for (const model of list) {
+  for (const [index, model] of list.entries()) {
     // Try MetadataStorage first (defineModel), fall back to model.schema
     const meta = MetadataStorage.getModelMetadata(model);
     const tableName = meta?.tableName || model.schema?.tableName;
@@ -322,6 +285,16 @@ export async function autoMigrate(
         "MIGRATE_ERROR",
       );
     }
+
+    // The unit of an auto-migration is the table, so the name reported is the
+    // table being reconciled rather than a migration's own name — which a
+    // caller who never wrote one could not otherwise attribute.
+    db.events.emit("migration:start", {
+      dbType: db.config.type,
+      name: tableName,
+      index,
+      total: list.length,
+    });
 
     const exists = await tableExists(db, tableName);
 
@@ -340,12 +313,11 @@ export async function autoMigrate(
         for (const [key, col] of Object.entries(meta.columns)) {
           const colName = (col as any).name || key;
           if (!existingCols.has(colName)) {
-            const sqlType = mapType(
-              typeof (col as any).type === "string"
-                ? (col as any).type
-                : DataTypes[(col as any).type],
-              dialect,
-            );
+            // The column, not just its type: `length`/`precision`/`scale` live
+            // on it and decide the width. Passing `col.type` raw is the same
+            // resolution the inline ternary used to do — the mapper accepts
+            // either the enum member or a name.
+            const sqlType = mapType((col as any).type, dialect, col as any);
             const notNull = (col as any).required ? " NOT NULL" : "";
             const defaultVal =
               (col as any).defaultValue !== undefined
@@ -413,12 +385,7 @@ export async function autoMigrate(
         for (const [key, col] of Object.entries(columns)) {
           const colName = (col as any).name || key;
           historyColumnNames.add(colName);
-          const sqlType = mapType(
-            typeof (col as any).type === "string"
-              ? (col as any).type
-              : DataTypes[(col as any).type],
-            dialect,
-          );
+          const sqlType = mapType((col as any).type, dialect, col as any);
           colDefs.push(`${q(colName)} ${sqlType}`);
         }
         const historyText = textType(dialect);
@@ -443,6 +410,13 @@ export async function autoMigrate(
         );
       }
     }
+
+    db.events.emit("migration:complete", {
+      dbType: db.config.type,
+      name: tableName,
+      index,
+      total: list.length,
+    });
   }
 }
 
@@ -472,7 +446,7 @@ async function createTableFromMeta(
         colDefs.push(`${q(colName)} ${getAutoIncrementPK(dialect)}`);
         continue;
       }
-      const pkParts = [q(colName), mapType(typeName, dialect)];
+      const pkParts = [q(colName), mapType(typeName, dialect, col as any)];
       // SQLite's one historical quirk: a PRIMARY KEY that is not an INTEGER
       // PRIMARY KEY may still hold NULL, so NOT NULL has to be explicit.
       pkParts.push("NOT NULL", "PRIMARY KEY");
@@ -481,7 +455,7 @@ async function createTableFromMeta(
     }
 
     const parts: string[] = [q(colName)];
-    parts.push(mapType(typeName, dialect));
+    parts.push(mapType(typeName, dialect, col as any));
     if ((col as any).required) parts.push("NOT NULL");
     if ((col as any).unique) parts.push("UNIQUE");
     if ((col as any).defaultValue !== undefined) {
@@ -531,37 +505,22 @@ async function createTableFromSchema(
   const q = (name: string) => quoteIdentifier(name, db.config.type);
   for (const [col, meta] of Object.entries(schema.columns)) {
     const m = meta as any;
-    const dialectMap: Record<string, Record<string, string>> = {
-      sqlite: {
-        string: "TEXT",
-        number: "INTEGER",
-        boolean: "INTEGER",
-        date: "TEXT",
-        json: "TEXT",
-      },
-      mysql: {
-        string: "VARCHAR(255)",
-        number: "INT",
-        boolean: "TINYINT(1)",
-        date: "DATETIME",
-        json: "JSON",
-      },
-      postgres: {
-        string: "TEXT",
-        number: "INTEGER",
-        boolean: "BOOLEAN",
-        date: "TIMESTAMP",
-        json: "JSONB",
-      },
-      mssql: {
-        string: "NVARCHAR(255)",
-        number: "INT",
-        boolean: "BIT",
-        date: "DATETIME2",
-        json: "NVARCHAR(MAX)",
-      },
+    // The inferred schema uses a JSON-shaped vocabulary — `number`, not
+    // `integer` — so each name maps to the `DataTypes` member it stands for
+    // before `mapType` resolves it. Every cell of the table this replaces
+    // agreed with `mapType` already; this is the same answer reached without a
+    // third copy of it.
+    const inferred: Record<string, DataTypes> = {
+      string: DataTypes.STRING,
+      number: DataTypes.INTEGER,
+      boolean: DataTypes.BOOLEAN,
+      date: DataTypes.DATETIME,
+      json: DataTypes.JSON,
     };
-    let sql = `${q(col)} ${dialectMap[dialect]?.[m.type] || "TEXT"}`;
+    const resolved = inferred[m.type];
+    let sql = `${q(col)} ${
+      resolved === undefined ? "TEXT" : mapType(resolved, dialect, m)
+    }`;
     if (m.primaryKey) sql += " PRIMARY KEY";
     if (m.autoIncrement) {
       sql +=

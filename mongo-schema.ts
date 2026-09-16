@@ -503,9 +503,24 @@ export async function mongoAutoMigrate(
   plans.push(...planMongoLinkCollections(models));
   plans.push(...planMongoHistoryCollections(models));
 
-  for (const plan of plans) {
+  for (const [index, plan] of plans.entries()) {
+    // Per collection, which is what the work is actually divided into — the
+    // list is the models' own collections plus the link and history
+    // collections they imply, so `total` counts work rather than models.
+    db.events.emit("migration:start", {
+      dbType: db.config.type,
+      name: plan.collection,
+      index,
+      total: plans.length,
+    });
     await ensureCollection(db, plan);
     await ensureIndexes(db, plan);
+    db.events.emit("migration:complete", {
+      dbType: db.config.type,
+      name: plan.collection,
+      index,
+      total: plans.length,
+    });
   }
 
   // The counters collection itself, so a fresh database has somewhere for the

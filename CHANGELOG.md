@@ -6,6 +6,57 @@ All notable changes to this project will be documented in this file.
 
 - Further features and improvements coming soon.
 
+## [3.1.0] - 2026-09-16
+
+### Added
+
+- **`length`, `precision` and `scale` now mean something.** All three were declared on `ColumnConfig` and read by nobody: the SQL type came from the `DataTypes` member alone, so `{ type: DataTypes.STRING, length: 50 }` emitted `VARCHAR(255)` on MySQL and a 200-character value was stored without complaint. One column-aware type mapper now produces the width where the dialect has one — `VARCHAR(n)` on MySQL, `NVARCHAR(n)` on SQL Server — and the value is checked against the same limit on write, so the rule holds on Postgres and SQLite too, where `TEXT` and `NUMERIC` cannot express it. Given both `length` and `maxLength`, `length` sets the column width and `maxLength` is what a value is checked against; `maxLength` alone remains validation-only and changes no DDL, as before.
+  **This narrows existing behaviour.** A column declared narrower than the values already in it will now reject writes that previously succeeded.
+- **`StabilizeKV`**, an in-process key-value store backing the cache when no `redisUrl` is configured. Its API follows Cloudflare Workers KV — `get`/`put`/`delete`/`list`, `expiration` and `expirationTtl`, metadata, cursor pagination — and it is LRU-bounded by `maxEntries` (default 1000). Exported both as the cache's backend and on its own from `stabilize-orm/stabilize-kv`.
+- **Encryption keys can be generated and rotated.** `ORM_ENCRYPTION_KEY_FILE` names a key file (default `.stabilize/encryption.key`), and if neither the variable nor the file is present a key is generated, written with mode `0600` where the filesystem honours it, and announced with a `STABILIZE_ENCRYPTION_KEY_GENERATED` warning. `ORM_ENCRYPTION_KEYS_OLD` and the file's `retired` list hold keys that still decrypt. `activeKeyId()` is exported from `stabilize-orm/utils/encryption`.
+- **The seven events that never fired now do.** `query`, `error`, `migration:start`, `migration:complete`, `transaction:start`, `transaction:complete` and `transaction:error` are emitted, with the payloads the `StabilizeEvent` type already declared. Each `error` payload carries a `phase` of `"query"`, `"transaction"` or `"migration"`.
+
+### Changed
+
+- **The ciphertext format is now `v3:<keyId>:<iv>:<tag>:<ciphertext>`.** The key id is `sha256(key)` truncated to eight hex characters — derived, not assigned — so a value names the key that wrote it and a key moved between the environment and the key file keeps its identity. Existing `v2:` and CBC values still read.
+- **`Cache.enabled: true` with no `redisUrl` now caches.** It previously built no client and every method became a silent no-op: `get` returned null, `set` discarded, `getStats` reported zeros forever. There was no error and no caching, only the appearance of it.
+- **`CacheStats` gained a required `backend` field** (`"redis" | "memory" | "disabled"`), so a cache doing nothing is distinguishable from one that is merely cold. `healthCheck()`'s `cacheStatus` reports the backend by name — `"in-memory"` is new — rather than reducing it to connected-or-not.
+- **`Stabilize`'s client no longer builds its own emitter.** It is handed the ORM's, so events the client fires reach a handler registered on `orm.events`. A fifth constructor argument accepts an emitter of your own, which is the only way to hear `connection:open`, since that fires from the constructor.
+- **The key id is reported** rather than inferred, and `pluck()` continues to return raw ciphertext while `selectColumns()` is decrypted.
+
+### Fixed
+
+- **A JSON object written to SQLite was silently destroyed.** The SQLite path handed the value straight to the driver, which binds a plain object as `NULL` — with no error at all — and spreads an array as the parameter list, failing the statement. `bindSQLiteParams` mirrors the MySQL and SQL Server binders.
+- **`sanitizeSqlValue` discarded JSON on every backend.** A versioned model with a JSON column stored `NULL` in its history table even on MySQL and Postgres, contradicting the docblock above it.
+- **`processForLoad` read the wrong key on a renamed column.** It indexed rows by property name while `SELECT *` returns them by column name, so an encrypted column that also declared `name:` was handed back as ciphertext.
+- **Postgres `DECIMAL` was unconstrained.** It emitted a bare `DECIMAL`, which stores whatever it is handed, while MySQL and SQL Server emitted `DECIMAL(10,2)`. The three now agree on `DECIMAL(10,2)`. **This narrows the column**: a value over ten digits that Postgres previously accepted is now rejected, and a regenerated migration produces the constrained form.
+
+### Security
+
+- **A missing encryption key generated one, where it used to throw.** The generated file is only as durable as the filesystem it lands in — a container's ephemeral layer loses it, and every value it encrypted with it. Set `ORM_ENCRYPTION_KEY` in production, and add `.stabilize/` to `.gitignore`.
+
+## [3.0.0] - 2026-09-16
+
+This release was published without a changelog entry, so the entry below was written afterwards from the commits it shipped. It is not a reconstruction of intent — everything listed is in the release.
+
+### Added
+
+- **A MongoDB backend.** `DBType.MongoDB` selects a document store rather than a fifth SQL dialect. Models, repositories, relations, hooks, versioning, soft deletes, validation, encryption, aggregates and transactions work as they do on SQL. Four files carry it — `mongo-query.ts` translates the query builder's structured methods into command documents, `mongo-repository.ts` implements the repository against them, `mongo-schema.ts` renders a `$jsonSchema` validator, and `mongo-migrate.ts` creates and drops indexes where a migration would alter a table.
+  `mongodb` is an **optional** dependency and the only one: it is external in the build, so a project that never sets `DBType.MongoDB` does not pull it in. Configuration gains `database` (the fallback for a URI whose path omits one) and `mongoOptions` (passed verbatim to `MongoClient`).
+- **Refusals instead of mistranslations.** A document store is not a SQL engine, and where the two disagree the ORM reports it rather than guessing — a dropped `join()` would return the wrong rows with no error to notice. `rawQuery()`, `rawExec()`, `query()` and `queryExec()` throw `MONGO_UNSUPPORTED`; `join()`, `union()`, `with()`, `whereRaw()`, `selectRaw()`, `having()`, `distinct()` and the SQL-text forms of `where()` throw at **execution** time and name every offending method at once. `withRelations()` is the replacement for a join, resolving relations in batched reads.
+- **Transactional auto-increment ids.** Ids are reserved with a `$inc` against a `stabilize_counters` collection keyed by collection name rather than by the server. Because the reservation shares the write's transaction, an aborted transaction returns its ids — the opposite of InnoDB, whose counter is not transactional and leaks the gap.
+
+### Known Issues
+
+- **`DECIMAL` is stored as a `double`.** MongoDB has no exact decimal unless the caller supplies a `Decimal128`, so a `DECIMAL` column loses precision the way a binary float does. Nothing is enforced, because nothing can be: store money as an `INTEGER`/`BIGINT` of the smallest unit, or as a `STRING`.
+- **`lock()` / `forUpdate()` is a no-op.** MongoDB has no row lock to map it onto, so the clause is not rendered and the query runs unlocked rather than failing. Use `updateBy()` with a condition, or an optimistic lock column, for a read-modify-write that has to be safe.
+- **Transactions require a replica set or a sharded cluster.** A standalone `mongod` serves reads but rejects every transaction — and every repository write runs inside one, so a standalone fails writes generally rather than only explicitly-transactional code. The client warns at connect time and the failure is reported as `TX_ERROR`.
+- **`poolStats()` returns `{ active: -1, idle: -1, total: -1 }`.** The driver's pool is internal and per-server, so there is no honest number to report and the sentinel says so rather than inventing one. `healthCheck()` pings the server instead.
+
+### Changed
+
+- `DBType` gains a `MongoDB` member. Since `DBType` is a string enum, existing persisted values are unaffected.
+
 ## [2.2.1] - 2026-09-15
 
 Documentation-only release. No library code changed from 2.2.0.

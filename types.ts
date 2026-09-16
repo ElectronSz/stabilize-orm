@@ -73,10 +73,29 @@ export interface DBConfig {
 }
 
 export interface CacheConfig {
+  /** Whether to cache at all. A `true` here always builds a working cache. */
   enabled: boolean;
+  /** Default time-to-live, in seconds. */
   ttl: number;
+  /**
+   * The Redis server to cache in.
+   *
+   * Optional, and genuinely so: without it the cache runs in process, backed by
+   * {@link StabilizeKV}. That store is private to one process — not shared between
+   * instances, not replicated, gone when the process exits — so pass a URL
+   * whenever two application servers have to see the same cache. With one
+   * server, a test suite or local development, leaving it out is fine and saves
+   * running Redis.
+   */
   redisUrl?: string;
+  /** Prepended to every key, so one Redis can serve several applications. */
   cachePrefix?: string;
+  /**
+   * How many entries the in-process store holds before it evicts the least
+   * recently used. Ignored when `redisUrl` is set — Redis does its own
+   * eviction, and this would be a second, invisible one. Defaults to 1000.
+   */
+  maxEntries?: number;
   strategy?: "cache-aside" | "write-through";
 }
 
@@ -105,6 +124,17 @@ export interface CacheStats {
   hits: number;
   misses: number;
   keys: number;
+  /**
+   * Which store answered.
+   *
+   * Present so a cache that is not doing anything is distinguishable from one
+   * that is merely cold: `"disabled"` means `enabled` was false, `"memory"`
+   * means no `redisUrl` was configured and the cache is confined to this
+   * process, and `"redis"` means a client was built — which reports the
+   * configuration, not the connection, since `ioredis` connects lazily and may
+   * fail to later.
+   */
+  backend: "redis" | "memory" | "disabled";
 }
 
 /**

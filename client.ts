@@ -8,7 +8,12 @@ import { Database, Statement } from "bun:sqlite";
 import { Pool, type PoolClient } from "pg";
 import mysql from "mysql2/promise";
 import sql from "mssql";
-import { type DBConfig, StabilizeError, DBType } from "./types";
+import {
+  type DBConfig,
+  StabilizeError,
+  DBType,
+  StabilizeEmitter,
+} from "./types";
 import { type Logger, StabilizeLogger } from "./logger";
 
 /**
@@ -145,6 +150,29 @@ export function isPlainJsonValue(value: any): boolean {
  * @returns The parameters as the driver should receive them.
  */
 export function bindMySQLParams(params: any[]): any[] {
+  return params.map((value) =>
+    isPlainJsonValue(value) ? JSON.stringify(value) : value,
+  );
+}
+
+/**
+ * Encodes the parameters of a SQLite statement for `bun:sqlite`.
+ *
+ * `bun:sqlite` binds only strings, numbers, bigints, booleans, `null` and typed
+ * arrays. A plain object is bound as **NULL** — no error, no warning, the value
+ * is simply gone — and an array is spread as if it were the parameter list, so
+ * `[1, 2, 3]` for one placeholder fails the whole statement with "SQLite query
+ * expected 1 values, received 3". Neither is what a `DataTypes.JSON` column
+ * means, and the MySQL and SQL Server paths already encode both as JSON text.
+ * This is the same answer for the third driver.
+ *
+ * Returned as a new list rather than mutated, matching {@link bindMySQLParams}:
+ * callers reuse the array they built.
+ *
+ * @param params The statement's positional parameters.
+ * @returns The parameters as the driver should receive them.
+ */
+export function bindSQLiteParams(params: any[]): any[] {
   return params.map((value) =>
     isPlainJsonValue(value) ? JSON.stringify(value) : value,
   );
@@ -335,6 +363,17 @@ export class DBClient {
     | MongoHandle;
   private logger: Logger;
   public readonly config: DBConfig;
+  /**
+   * The emitter every statement, transaction and failure is announced on.
+   *
+   * Public because `autoMigrate` and the migration runners reach it through the
+   * client they are handed, and because `Stabilize` shares one instance with
+   * the client it constructs — so a handler registered on the ORM sees what the
+   * client fires, without the ORM having to relay anything.
+   *
+   * @see StabilizeEvent for the payload of each event.
+   */
+  public events: StabilizeEmitter;
   private retryAttempts: number;
   private retryDelay: number;
   private maxJitter: number;
@@ -387,9 +426,15 @@ export class DBClient {
       | MongoHandle
       | null = null,
     mongoSession: MongoSessionHandle | null = null,
+    events?: StabilizeEmitter,
   ) {
     this.config = config;
     this.logger = logger;
+    // A client built on its own still has an emitter, so every `emit` below is
+    // unconditional and no call site has to ask whether anyone is listening.
+    // `Stabilize` hands in its own instance, which is what makes the events a
+    // caller subscribes to on the ORM the ones this client fires.
+    this.events = events ?? new StabilizeEmitter();
     this.retryAttempts = config.retryAttempts || 3;
     this.retryDelay = config.retryDelay || 1000;
     this.maxJitter = config.maxJitter || 100;
@@ -401,6 +446,21 @@ export class DBClient {
     } else {
       this.initializeClient(config);
     }
+  }
+
+  /**
+   * Points this client at an emitter owned by someone else.
+   *
+   * `Stabilize` normally hands its emitter to the constructor, so the two share
+   * one. This exists for the case the constructor cannot cover: a client built
+   * before the ORM existed, which `Stabilize` is then handed. Without it, `on`
+   * calls on the ORM would hear only the two connection events and never a
+   * `query`, `error` or `transaction:*`.
+   *
+   * @param events The emitter whose listeners should receive this client's events.
+   */
+  useEmitter(events: StabilizeEmitter): void {
+    this.events = events;
   }
 
   /**
@@ -706,7 +766,7 @@ export class DBClient {
             stmt = this.client.prepare(query);
             this.preparedStatements.set(query, stmt);
           }
-          result = stmt.all(...params);
+          result = stmt.all(...bindSQLiteParams(params));
         } else if (this.config.type === DBType.MySQL) {
           const [rows] = await (this.client as mysql.Pool).query(
             query,
@@ -732,10 +792,22 @@ export class DBClient {
         }
 
         const executionTime = Date.now() - start;
-        this.logger.logQuery(query, params, executionTime);
+        this.recordQuery(query, params, executionTime);
         return Array.isArray(result) ? (result as T[]) : [];
       } catch (error) {
         this.logger.logError(error as Error);
+        // Announced on every attempt, and with the attempt number, so a
+        // listener can tell a transient failure that was retried and succeeded
+        // from the one that ended the call.
+        this.events.emit("error", {
+          dbType: this.config.type,
+          phase: "query",
+          query,
+          params,
+          attempt,
+          attempts,
+          error,
+        });
         if (attempt === attempts) {
           throw new StabilizeError(
             `Query failed after ${attempts} attempt${attempts === 1 ? "" : "s"}: ${(error as Error).message}`,
@@ -766,8 +838,45 @@ export class DBClient {
   async transaction<T>(
     callback: (txClient: DBClient) => Promise<T>,
   ): Promise<T> {
+    // A nested call — a repository write inside a transaction the caller has
+    // already opened — joins the open transaction rather than starting a second
+    // one. It is not a transaction boundary, so it announces nothing: a
+    // listener pairing `transaction:start` against `transaction:complete` would
+    // otherwise be handed pairs that neither opened nor closed anything.
     if (this.isTransactionClient) return callback(this);
 
+    this.events.emit("transaction:start", { dbType: this.config.type });
+    try {
+      const result = await this.runTransaction(callback);
+      this.events.emit("transaction:complete", { dbType: this.config.type });
+      return result;
+    } catch (error) {
+      this.events.emit("transaction:error", {
+        dbType: this.config.type,
+        // Every `error` payload carries a phase, so a listener that filters on
+        // one does not silently miss the third. The other two are "query" and
+        // "migration".
+        phase: "transaction",
+        error,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Opens, commits and rolls back one transaction on whichever backend this
+   * client is bound to.
+   *
+   * Split from {@link transaction} so the events wrap the whole thing — five
+   * backends each drive their own BEGIN/COMMIT, and announcing a boundary from
+   * inside each of them would be five places to keep in step instead of one.
+   *
+   * @param callback The callback to execute within the transaction context.
+   * @returns The result of the callback.
+   */
+  private async runTransaction<T>(
+    callback: (txClient: DBClient) => Promise<T>,
+  ): Promise<T> {
     if (this.client instanceof Database) {
       // `bun:sqlite`'s own `db.transaction()` is synchronous: it issues
       // COMMIT as soon as the callback returns, and an async callback returns
@@ -813,7 +922,7 @@ export class DBClient {
       // The transaction-bound client keeps the parent's `MongoClient` and adds
       // the session, because mongo commands carry a session rather than being
       // sent through a different connection.
-      const txClient = new DBClient(this.config, this.logger, handle, session);
+      const txClient = new DBClient(this.config, this.logger, handle, session, this.events);
       this.logger.logDebug("Starting MongoDB transaction.");
 
       try {
@@ -848,7 +957,7 @@ export class DBClient {
       // the guard above returns early for it.
       await this.ensureMSSQLConnected();
       const transaction = new sql.Transaction(this.client as any);
-      const txClient = new DBClient(this.config, this.logger, transaction);
+      const txClient = new DBClient(this.config, this.logger, transaction, null, this.events);
       this.logger.logDebug("Starting MSSQL transaction.");
       await transaction.begin();
       try {
@@ -869,7 +978,7 @@ export class DBClient {
 
     if (isMySQLPool(this.client)) {
       const connection = await this.client.getConnection();
-      const txClient = new DBClient(this.config, this.logger, connection);
+      const txClient = new DBClient(this.config, this.logger, connection, null, this.events);
       this.logger.logDebug("Starting MySQL transaction.");
       try {
         await txClient.query("START TRANSACTION");
@@ -887,7 +996,7 @@ export class DBClient {
 
     if (this.client instanceof Pool) {
       const connection = await this.client.connect();
-      const txClient = new DBClient(this.config, this.logger, connection);
+      const txClient = new DBClient(this.config, this.logger, connection, null, this.events);
       this.logger.logDebug("Starting Postgres transaction.");
       try {
         await txClient.migrationQuery("BEGIN");
@@ -943,6 +1052,33 @@ export class DBClient {
     this.logger.logInfo("Database connection closed");
   }
 
+  /**
+   * Reports one executed statement to the logger and to the event listeners.
+   *
+   * The two are kept together deliberately: every execution site already logged
+   * its statement, and a `query` event that missed one of them would be a
+   * hook that silently saw some of the traffic. There are four such sites —
+   * `query`, `queryExec`, `migrationQuery` and `mongoRun` — and one call here
+   * covers each.
+   *
+   * @param query The statement or, on MongoDB, the operation's label.
+   * @param params The parameters it was sent with.
+   * @param executionTime How long it took, in milliseconds.
+   */
+  private recordQuery(
+    query: string,
+    params: any[],
+    executionTime: number,
+  ): void {
+    this.logger.logQuery(query, params, executionTime);
+    this.events.emit("query", {
+      dbType: this.config.type,
+      query,
+      params,
+      executionTime,
+    });
+  }
+
   async queryExec(
     query: string,
     params: any[] = [],
@@ -952,7 +1088,7 @@ export class DBClient {
     let affectedRows = 0;
 
     if (this.client instanceof Database) {
-      const result = this.client.run(query, ...params);
+      const result = this.client.run(query, ...bindSQLiteParams(params));
       affectedRows = result.changes;
     } else if (this.config.type === DBType.MySQL) {
       const [mysqlResult] = await (this.client as mysql.Pool).query(
@@ -974,7 +1110,7 @@ export class DBClient {
     }
 
     const executionTime = Date.now() - start;
-    this.logger.logQuery(query, params, executionTime);
+    this.recordQuery(query, params, executionTime);
     return { affectedRows };
   }
 
@@ -994,7 +1130,7 @@ export class DBClient {
         stmt = this.client.prepare(query);
         this.preparedStatements.set(query, stmt);
       }
-      stmt.run(...params);
+      stmt.run(...bindSQLiteParams(params));
     } else if (this.config.type === DBType.MySQL) {
       await (this.client as mysql.Pool).query(query, bindMySQLParams(params));
     } else if (this.config.type === DBType.Postgres) {
@@ -1007,7 +1143,7 @@ export class DBClient {
     }
 
     const executionTime = Date.now() - start;
-    this.logger.logQuery(query, params, executionTime);
+    this.recordQuery(query, params, executionTime);
   }
 
   // ---------------------------------------------------------------------------
@@ -1041,7 +1177,7 @@ export class DBClient {
     try {
       const db = await this.mongoDb();
       const result = await operation(db);
-      this.logger.logQuery(label, [detail], Date.now() - start);
+      this.recordQuery(label, [], Date.now() - start);
       return result;
     } catch (error) {
       if (error instanceof StabilizeError) throw error;
