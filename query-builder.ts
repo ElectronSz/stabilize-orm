@@ -8,6 +8,21 @@ import { DBClient } from "./client";
 import { Cache } from "./cache";
 import { MetadataStorage } from "./model";
 import { DBType, StabilizeError } from "./types";
+import {
+  buildMongoAggregatePipeline,
+  buildMongoProjection,
+  buildMongoSpec,
+  createMongoBlockers,
+  normalizeMongoDoc,
+  recordMongoBlocker,
+  type CompareOp,
+  type MongoAggregate,
+  type MongoBlockers,
+  type MongoFieldContext,
+  type MongoFilterNode,
+  type MongoQuerySpec,
+  type Predicate,
+} from "./mongo-query";
 
 type JoinType = "INNER" | "LEFT" | "RIGHT" | "FULL" | "CROSS";
 type LockMode =
@@ -122,6 +137,15 @@ export class QueryBuilder<T> {
     params: any[];
     recursive: boolean;
   }[] = [];
+  /**
+   * The conditions this builder recorded for MongoDB, as a tree.
+   * @see MongoFilterNode for why this is not a flat list.
+   */
+  private mongoAndList: MongoFilterNode[] = [];
+  /** Clauses that were asked for and have no MongoDB equivalent. */
+  private mongoBlockers: MongoBlockers = createMongoBlockers();
+  /** The aggregate this builder selects, when it used a shortcut for one. */
+  private mongoAggregates: MongoAggregate[] | null = null;
 
   constructor(table: string) {
     this.table = table;
@@ -135,6 +159,7 @@ export class QueryBuilder<T> {
   }
 
   selectRaw(expression: string, ...params: any[]): QueryBuilder<T> {
+    this.markMongoUnsupported("selectRaw", expression);
     this.selectFields.push(expression);
     // Kept separate from `whereParams`: the SELECT list is emitted before the
     // WHERE clause, so sharing one array would bind the values out of order.
@@ -143,6 +168,10 @@ export class QueryBuilder<T> {
   }
 
   distinct(): QueryBuilder<T> {
+    // `SELECT DISTINCT` is a statement-wide modifier, whereas Mongo distincts a
+    // single field and returns a value list rather than documents. Reported
+    // rather than dropped, which would return duplicates SQL would not.
+    this.markMongoUnsupported("distinct");
     this.isDistinct = true;
     return this;
   }
@@ -171,32 +200,46 @@ export class QueryBuilder<T> {
 
   count(column: string = "*", alias: string = "count"): QueryBuilder<T> {
     this.selectFields = [`COUNT(${column}) AS ${alias}`];
+    // Recorded alongside, so `buildMongo` can emit a `$group` stage instead of
+    // reporting the SQL aggregate expression as untranslatable. Set rather than
+    // pushed: these shortcuts replace `selectFields`, so a second call replaces
+    // the first aggregate rather than accumulating one.
+    this.mongoAggregates = [{ fn: "count", column, alias }];
     return this;
   }
 
   sum(column: string, alias: string = "sum"): QueryBuilder<T> {
     this.selectFields = [`SUM(${column}) AS ${alias}`];
+    this.mongoAggregates = [{ fn: "sum", column, alias }];
     return this;
   }
 
   avg(column: string, alias: string = "avg"): QueryBuilder<T> {
     this.selectFields = [`AVG(${column}) AS ${alias}`];
+    this.mongoAggregates = [{ fn: "avg", column, alias }];
     return this;
   }
 
   min(column: string, alias: string = "min"): QueryBuilder<T> {
     this.selectFields = [`MIN(${column}) AS ${alias}`];
+    this.mongoAggregates = [{ fn: "min", column, alias }];
     return this;
   }
 
   max(column: string, alias: string = "max"): QueryBuilder<T> {
     this.selectFields = [`MAX(${column}) AS ${alias}`];
+    this.mongoAggregates = [{ fn: "max", column, alias }];
     return this;
   }
 
   // ─── WHERE ────────────────────────────────────────────────────────
 
   where(condition: string, ...params: any[]): QueryBuilder<T> {
+    // There is no SQL text to translate, and no parser here that could be
+    // trusted with one — a `where("a = 1 OR b = 2")` misread would return the
+    // wrong rows silently. Reported at execute time instead, alongside any
+    // other blocked clause.
+    this.markMongoUnsupported("where", condition);
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${condition}`);
     } else {
@@ -207,6 +250,7 @@ export class QueryBuilder<T> {
   }
 
   orWhere(condition: string, ...params: any[]): QueryBuilder<T> {
+    this.markMongoUnsupported("orWhere", condition);
     if (this.whereConditions.length === 0) {
       this.whereConditions.push(condition);
     } else {
@@ -224,6 +268,7 @@ export class QueryBuilder<T> {
   }
 
   whereNot(condition: string, ...params: any[]): QueryBuilder<T> {
+    this.markMongoUnsupported("whereNot", condition);
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND NOT (${condition})`);
     } else {
@@ -234,6 +279,7 @@ export class QueryBuilder<T> {
   }
 
   whereIn(column: string, values: any[]): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "in", column, values });
     if (values.length === 0) {
       if (this.whereConditions.length > 0) {
         this.whereConditions.push("AND 1 = 0");
@@ -253,6 +299,7 @@ export class QueryBuilder<T> {
   }
 
   whereNotIn(column: string, values: any[]): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "nin", column, values });
     if (values.length === 0) return this;
     const placeholders = values.map(() => "?").join(", ");
     if (this.whereConditions.length > 0) {
@@ -265,6 +312,7 @@ export class QueryBuilder<T> {
   }
 
   whereNull(column: string): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "null", column });
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${column} IS NULL`);
     } else {
@@ -274,6 +322,7 @@ export class QueryBuilder<T> {
   }
 
   whereNotNull(column: string): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "notNull", column });
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${column} IS NOT NULL`);
     } else {
@@ -283,6 +332,7 @@ export class QueryBuilder<T> {
   }
 
   whereBetween(column: string, start: any, end: any): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "between", column, start, end });
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${column} BETWEEN ? AND ?`);
     } else {
@@ -293,6 +343,7 @@ export class QueryBuilder<T> {
   }
 
   whereNotBetween(column: string, start: any, end: any): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "notBetween", column, start, end });
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${column} NOT BETWEEN ? AND ?`);
     } else {
@@ -303,6 +354,7 @@ export class QueryBuilder<T> {
   }
 
   whereLike(column: string, pattern: string): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "like", column, value: pattern });
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${column} LIKE ?`);
     } else {
@@ -313,6 +365,7 @@ export class QueryBuilder<T> {
   }
 
   whereILike(column: string, pattern: string): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "ilike", column, value: pattern });
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${column} ILIKE ?`);
     } else {
@@ -322,7 +375,63 @@ export class QueryBuilder<T> {
     return this;
   }
 
+  // ─── STRUCTURED COMPARISONS ───────────────────────────────────────
+  //
+  // The methods above take a column and operands; `where` takes SQL text. These
+  // cover the one shape that has no structured form yet — a bare comparison —
+  // so that a caller never has to reach for `where("a > ?")` and lose the
+  // MongoDB translation. They render to SQL exactly as the equivalent `where`
+  // call would.
+
+  whereEq(column: string, value: any): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "cmp", column, compare: "=", value });
+    return this.pushComparison(column, "=", value);
+  }
+
+  whereNotEq(column: string, value: any): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "cmp", column, compare: "!=", value });
+    return this.pushComparison(column, "!=", value);
+  }
+
+  whereCompare(column: string, op: CompareOp, value: any): QueryBuilder<T> {
+    this.addMongoPredicate({ op: "cmp", column, compare: op, value });
+    return this.pushComparison(column, op, value);
+  }
+
+  orWhereEq(column: string, value: any): QueryBuilder<T> {
+    this.foldMongoOr({ kind: "pred", predicate: { op: "cmp", column, compare: "=", value } });
+    return this.pushComparison(column, "=", value, true);
+  }
+
+  orWhereCompare(column: string, op: CompareOp, value: any): QueryBuilder<T> {
+    this.foldMongoOr({ kind: "pred", predicate: { op: "cmp", column, compare: op, value } });
+    return this.pushComparison(column, op, value, true);
+  }
+
+  orWhereNull(column: string): QueryBuilder<T> {
+    this.foldMongoOr({ kind: "pred", predicate: { op: "null", column } });
+    return this.pushCondition(`${column} IS NULL`, [], true);
+  }
+
+  orWhereNotNull(column: string): QueryBuilder<T> {
+    this.foldMongoOr({ kind: "pred", predicate: { op: "notNull", column } });
+    return this.pushCondition(`${column} IS NOT NULL`, [], true);
+  }
+
+  orWhereIn(column: string, values: any[]): QueryBuilder<T> {
+    this.foldMongoOr({ kind: "pred", predicate: { op: "in", column, values } });
+    if (values.length === 0) {
+      return this.pushCondition("1 = 0", [], true);
+    }
+    const placeholders = values.map(() => "?").join(", ");
+    return this.pushCondition(`${column} IN (${placeholders})`, values, true);
+  }
+
   whereExists(builderOrSql: string | QueryBuilder<any>): QueryBuilder<T> {
+    this.markMongoUnsupported(
+      "whereExists",
+      typeof builderOrSql === "string" ? builderOrSql : "subquery",
+    );
     const sql =
       typeof builderOrSql === "string"
         ? builderOrSql
@@ -339,6 +448,10 @@ export class QueryBuilder<T> {
   }
 
   whereNotExists(builderOrSql: string | QueryBuilder<any>): QueryBuilder<T> {
+    this.markMongoUnsupported(
+      "whereNotExists",
+      typeof builderOrSql === "string" ? builderOrSql : "subquery",
+    );
     const sql =
       typeof builderOrSql === "string"
         ? builderOrSql
@@ -355,6 +468,7 @@ export class QueryBuilder<T> {
   }
 
   whereRaw(rawSql: string, ...params: any[]): QueryBuilder<T> {
+    this.markMongoUnsupported("whereRaw", rawSql);
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${rawSql}`);
     } else {
@@ -366,6 +480,10 @@ export class QueryBuilder<T> {
 
   /** Knex-style column-to-column comparison: .whereRef('orders.user_id', '=', 'users.id') */
   whereRef(leftCol: string, op: string, rightCol: string): QueryBuilder<T> {
+    // Column-to-column comparison is what `$expr` does, but only for the four
+    // arithmetic operators, and the caller may pass any SQL operator. Reported
+    // rather than half-translated.
+    this.markMongoUnsupported("whereRef", `${leftCol} ${op} ${rightCol}`);
     if (this.whereConditions.length > 0) {
       this.whereConditions.push(`AND ${leftCol} ${op} ${rightCol}`);
     } else {
@@ -380,32 +498,35 @@ export class QueryBuilder<T> {
     type: JoinType,
     table: string,
     condition: string,
+    method: string,
   ): QueryBuilder<T> {
+    this.markMongoUnsupported(method, `${type} JOIN ${table} ON ${condition}`);
     this.joins.push(`${type} JOIN ${table} ON ${condition}`);
     return this;
   }
 
   join(table: string, condition: string): QueryBuilder<T> {
-    return this.addJoin("LEFT", table, condition);
+    return this.addJoin("LEFT", table, condition, "join");
   }
 
   innerJoin(table: string, condition: string): QueryBuilder<T> {
-    return this.addJoin("INNER", table, condition);
+    return this.addJoin("INNER", table, condition, "innerJoin");
   }
 
   leftJoin(table: string, condition: string): QueryBuilder<T> {
-    return this.addJoin("LEFT", table, condition);
+    return this.addJoin("LEFT", table, condition, "leftJoin");
   }
 
   rightJoin(table: string, condition: string): QueryBuilder<T> {
-    return this.addJoin("RIGHT", table, condition);
+    return this.addJoin("RIGHT", table, condition, "rightJoin");
   }
 
   fullJoin(table: string, condition: string): QueryBuilder<T> {
-    return this.addJoin("FULL", table, condition);
+    return this.addJoin("FULL", table, condition, "fullJoin");
   }
 
   crossJoin(table: string): QueryBuilder<T> {
+    this.markMongoUnsupported("crossJoin", table);
     this.joins.push(`CROSS JOIN ${table}`);
     return this;
   }
@@ -437,6 +558,7 @@ export class QueryBuilder<T> {
    * ```
    */
   orderByRaw(expression: string, direction?: "ASC" | "DESC"): QueryBuilder<T> {
+    this.markMongoUnsupported("orderByRaw", expression);
     const clause = direction ? `${expression} ${direction}` : expression;
     this.orderByClauses.push(clause);
     return this;
@@ -458,11 +580,17 @@ export class QueryBuilder<T> {
    * ```
    */
   groupByRaw(expression: string): QueryBuilder<T> {
+    this.markMongoUnsupported("groupByRaw", expression);
     this.groupByClauses.push(expression);
     return this;
   }
 
   having(condition: string, ...params: any[]): QueryBuilder<T> {
+    // HAVING filters groups; Mongo filters documents with `$match` and groups
+    // with `$group`, and a post-group filter needs `$match` placed *after* the
+    // `$group` stage. Translating the condition itself is the blocker, and the
+    // condition is SQL text — so this is reported rather than guessed at.
+    this.markMongoUnsupported("having", condition);
     if (this.havingConditions.length > 0) {
       this.havingConditions.push(`AND ${condition}`);
     } else {
@@ -538,6 +666,7 @@ export class QueryBuilder<T> {
   // ─── SET OPERATIONS ───────────────────────────────────────────────
 
   union(builder: QueryBuilder<any>): QueryBuilder<T> {
+    this.markMongoUnsupported("union");
     this.unions.push({
       query: builder.build().query,
       params: builder.build().params,
@@ -547,6 +676,7 @@ export class QueryBuilder<T> {
   }
 
   unionAll(builder: QueryBuilder<any>): QueryBuilder<T> {
+    this.markMongoUnsupported("unionAll");
     this.unions.push({
       query: builder.build().query,
       params: builder.build().params,
@@ -558,6 +688,7 @@ export class QueryBuilder<T> {
   // ─── COMMON TABLE EXPRESSIONS ─────────────────────────────────────
 
   with(name: string, builder: QueryBuilder<any>): QueryBuilder<T> {
+    this.markMongoUnsupported("with", name);
     this.ctas.push({
       name,
       query: builder.build().query,
@@ -568,6 +699,7 @@ export class QueryBuilder<T> {
   }
 
   withRecursive(name: string, builder: QueryBuilder<any>): QueryBuilder<T> {
+    this.markMongoUnsupported("withRecursive", name);
     this.ctas.push({
       name,
       query: builder.build().query,
@@ -655,6 +787,16 @@ export class QueryBuilder<T> {
     q.relationLoader = this.relationLoader;
     q.unions = [...this.unions];
     q.ctas = [...this.ctas];
+    // The nodes are treated as immutable once recorded — the recording methods
+    // replace the tree rather than mutate a node in place — so sharing them with
+    // the clone is safe. The blocker *arrays* are not shared: a clone that
+    // records a new blocker must not make the original report it.
+    q.mongoAndList = [...this.mongoAndList];
+    q.mongoBlockers = {
+      methods: [...this.mongoBlockers.methods],
+      details: [...this.mongoBlockers.details],
+    };
+    q.mongoAggregates = this.mongoAggregates ? [...this.mongoAggregates] : null;
     return q;
   }
 
@@ -738,7 +880,272 @@ export class QueryBuilder<T> {
     return this.build(dialect);
   }
 
+  // ─── MONGODB ──────────────────────────────────────────────────────
+  //
+  // The builder stays dialect-agnostic: it renders SQL fragments and records
+  // structured predicates side by side, and only decides which to use once a
+  // client appears. Nothing here changes what `build()` emits.
+
+  /** Appends a comparison fragment, ANDed or ORed into the WHERE clause. */
+  private pushComparison(
+    column: string,
+    op: CompareOp,
+    value: any,
+    isOr: boolean = false,
+  ): QueryBuilder<T> {
+    return this.pushCondition(`${column} ${op} ?`, [value], isOr);
+  }
+
+  /**
+   * Appends a condition, mirroring the fold `orWhere` performs.
+   *
+   * Shared by the structured comparison methods so their SQL output is
+   * character-for-character what the equivalent `where`/`orWhere` call
+   * produced, which is what keeps the four SQL backends unaffected.
+   */
+  private pushCondition(
+    condition: string,
+    params: any[],
+    isOr: boolean = false,
+  ): QueryBuilder<T> {
+    if (isOr) {
+      if (this.whereConditions.length === 0) {
+        this.whereConditions.push(condition);
+      } else {
+        this.whereConditions = [
+          `(${this.whereConditions.join(" ")} OR (${condition}))`,
+        ];
+      }
+    } else if (this.whereConditions.length > 0) {
+      this.whereConditions.push(`AND ${condition}`);
+    } else {
+      this.whereConditions.push(condition);
+    }
+    this.whereParams.push(...params);
+    return this;
+  }
+
+  /** Records a structured condition for MongoDB, ANDed with the rest. */
+  private addMongoPredicate(predicate: Predicate): void {
+    this.mongoAndList.push({ kind: "pred", predicate });
+  }
+
+  /**
+   * Folds a condition into the MongoDB tree as a disjunct.
+   *
+   * Deliberately identical to what `orWhere` does to the SQL fragment array:
+   * an empty list takes the condition bare, and otherwise the *whole* list so
+   * far becomes the left-hand side of the `or`. A flat list with an `OR` flag
+   * would not survive the round trip — see {@link MongoFilterNode}.
+   */
+  private foldMongoOr(node: MongoFilterNode): void {
+    if (this.mongoAndList.length === 0) {
+      this.mongoAndList.push(node);
+      return;
+    }
+    this.mongoAndList = [
+      {
+        kind: "or",
+        left: { kind: "and", items: this.mongoAndList },
+        right: node,
+      },
+    ];
+  }
+
+  /** Records a clause that cannot be expressed against MongoDB. */
+  private markMongoUnsupported(method: string, detail?: string): void {
+    recordMongoBlocker(this.mongoBlockers, method, detail);
+  }
+
+  /**
+   * The field-translation context, resolved from the model metadata.
+   *
+   * The primary key needs no flag on the column config: it is `id` by the same
+   * convention the repository already relies on when it writes `id = ?` and
+   * asks `getAutoIncrementField()` for the auto-increment column.
+   */
+  private mongoContext(): MongoFieldContext {
+    const ctx: MongoFieldContext = { table: this.table, alias: this.tableAlias };
+    const model = MetadataStorage.getModelByTableName(this.table);
+    if (!model) return ctx;
+
+    const columns = MetadataStorage.getColumns(model);
+    const columnNames: Record<string, string> = {};
+    for (const [key, config] of Object.entries(columns)) {
+      columnNames[key] = config.name ?? key;
+    }
+    ctx.columns = columnNames;
+    ctx.idProperty = "id";
+    ctx.primaryKey = columnNames["id"] ?? "id";
+    return ctx;
+  }
+
+  /** The aggregate this builder selects, if it used one of the shortcuts. */
+  getMongoAggregates(): MongoAggregate[] | null {
+    return this.mongoAggregates ? [...this.mongoAggregates] : null;
+  }
+
+  /**
+   * Renders this query as a MongoDB spec.
+   *
+   * Collected blockers are raised here rather than when the offending clause was
+   * added, because a builder is dialect-agnostic right up until a client is
+   * known — that is what lets one builder render for either backend.
+   *
+   * A `lock()`/`forUpdate()` is **not** reported. MongoDB has no row locking to
+   * map it onto and the call is a no-op, matching what the SQL Server path
+   * already does with it; the repository logs that where it has a logger.
+   *
+   * @throws StabilizeError `MONGO_UNSUPPORTED` naming every clause that has no
+   *   MongoDB equivalent.
+   */
+  buildMongo(): MongoQuerySpec {
+    // `selectRaw` records its own blocker, but `select()` accepts an expression
+    // too. A projection that cannot be built has to be reported rather than
+    // quietly widened to the whole document.
+    const selectsEverything =
+      this.selectFields.length === 1 && this.selectFields[0] === "*";
+    if (!selectsEverything && !this.mongoAggregates) {
+      const ctx = this.mongoContext();
+      if (!buildMongoProjection(this.selectFields, ctx)) {
+        recordMongoBlocker(
+          this.mongoBlockers,
+          "select",
+          this.selectFields.join(", "),
+        );
+      }
+    }
+
+    return buildMongoSpec({
+      filter: { kind: "and", items: this.mongoAndList },
+      orderBy: this.orderByClauses,
+      limit: this.limitValue,
+      offset: this.offsetValue,
+      select: this.selectFields,
+      blockers: this.mongoBlockers,
+      ctx: this.mongoContext(),
+    });
+  }
+
   // ─── EXECUTE ──────────────────────────────────────────────────────
+
+  /**
+   * Reads through MongoDB.
+   *
+   * Shares its shape with the SQL path on purpose: transform, then relations,
+   * then cache. Caching before the transform would cache raw column values, and
+   * caching before the relation load would cache a row with no relations on it,
+   * for the same reasons the SQL path orders it this way.
+   *
+   * @param client The client, which supplies the collection and any session.
+   * @param cache Optional cache to read through.
+   * @param cacheKey Key to read and write the cache under.
+   */
+  private async executeMongo(
+    client: DBClient,
+    cache?: Cache,
+    cacheKey?: string,
+  ): Promise<T[]> {
+    const cacheable =
+      cache && cacheKey && !(client as any).isTransactionClient;
+
+    if (cacheable) {
+      const cached = await cache.get<T[]>(cacheKey!);
+      if (cached) return cached;
+    }
+
+    const spec = this.buildMongo();
+    const idColumn = this.mongoContext().primaryKey ?? "id";
+
+    let results: T[];
+    if (this.mongoAggregates) {
+      // An aggregate replaces the projection: the caller asked for one number
+      // per group, not for the documents behind it.
+      const rows = await client.mongoAggregate(
+        this.table,
+        buildMongoAggregatePipeline(
+          spec.filter,
+          this.mongoAggregates,
+          this.mongoContext(),
+        ),
+      );
+      results = rows as T[];
+    } else {
+      const options: Record<string, unknown> = {};
+      if (spec.projection) options.projection = spec.projection;
+      if (spec.sort) options.sort = spec.sort;
+      if (spec.limit !== undefined) options.limit = spec.limit;
+      if (spec.skip !== undefined) options.skip = spec.skip;
+
+      const rows = await client.mongoFind(this.table, spec.filter, options);
+      results = rows.map((row) => normalizeMongoDoc<T>(row, idColumn));
+    }
+
+    if (this.rowTransform) results = this.rowTransform(results);
+
+    if (this.relationLoader && this.eagerRelations.length > 0) {
+      results = await this.relationLoader(results, this.eagerRelations, client);
+    }
+
+    if (cacheable && results.length > 0) {
+      await cache!.set(cacheKey!, results, cache!.config?.ttl ?? 60);
+    }
+
+    return results;
+  }
+
+  /**
+   * Counts matching documents.
+   *
+   * The filter is rebuilt without the sort, limit and skip: a count answers
+   * "how many match", and carrying the paging clauses over would either count a
+   * page or make the `skip`-implies-`_id`-sort rule add an order the caller
+   * never asked for. A grouped query is counted from the group stage instead,
+   * because there the rows are the groups.
+   *
+   * @param client The client to count through.
+   */
+  private async countMongo(client: DBClient): Promise<number> {
+    const filter = buildMongoSpec({
+      filter: { kind: "and", items: this.mongoAndList },
+      select: ["*"],
+      blockers: this.mongoBlockers,
+      ctx: this.mongoContext(),
+    }).filter;
+
+    if (this.mongoAggregates) {
+      const rows: any[] = await client.mongoAggregate(
+        this.table,
+        buildMongoAggregatePipeline(filter, this.mongoAggregates, this.mongoContext()),
+      );
+      return Number(rows[0]?.[this.mongoAggregates[0]!.alias] ?? 0);
+    }
+
+    return client.mongoCount(this.table, filter);
+  }
+
+  /**
+   * Reports whether any document matches.
+   *
+   * Reads one `_id` rather than counting: the answer is the same and the server
+   * can stop at the first match.
+   *
+   * @param client The client to probe through.
+   */
+  private async existsMongo(client: DBClient): Promise<boolean> {
+    const filter = buildMongoSpec({
+      filter: { kind: "and", items: this.mongoAndList },
+      select: ["*"],
+      blockers: this.mongoBlockers,
+      ctx: this.mongoContext(),
+    }).filter;
+
+    const rows = await client.mongoFind(this.table, filter, {
+      projection: { _id: 1 },
+      limit: 1,
+    });
+    return rows.length > 0;
+  }
 
   async execute(
     client: DBClient,
@@ -748,6 +1155,9 @@ export class QueryBuilder<T> {
     // Only the client knows which dialect this statement will be sent to, so
     // the row-limiting clause is decided here rather than at build time.
     this.dialect = client.config.type;
+    if (this.dialect === DBType.MongoDB) {
+      return this.executeMongo(client, cache, cacheKey);
+    }
     const { query, params } = this.build();
 
     // Never cache a read taken inside an open transaction: the rows may be
@@ -783,6 +1193,9 @@ export class QueryBuilder<T> {
   async countExec(client: DBClient): Promise<number> {
     const clone = this.clone();
     clone.dialect = client.config.type;
+    if (clone.dialect === DBType.MongoDB) {
+      return clone.countMongo(client);
+    }
     clone.orderByClauses = [];
     clone.limitValue = null;
     clone.offsetValue = null;
@@ -815,6 +1228,9 @@ export class QueryBuilder<T> {
   async existsExec(client: DBClient): Promise<boolean> {
     const clone = this.clone();
     clone.dialect = client.config.type;
+    if (clone.dialect === DBType.MongoDB) {
+      return clone.existsMongo(client);
+    }
     clone.selectFields = ["1"];
     clone.orderByClauses = [];
     clone.limitValue = 1;

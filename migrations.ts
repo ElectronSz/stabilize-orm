@@ -14,6 +14,7 @@ import {
   DBType,
   DataTypes,
 } from "./types";
+import { runMongoMigrations } from "./mongo-migrate";
 
 /**
  * Quotes an identifier for the target dialect.
@@ -525,6 +526,13 @@ function getMigrationsTableSQL(dbType: DBType): string {
  * @param migrations An array of `Migration` objects to be executed.
  */
 export async function runMigrations(config: DBConfig, migrations: Migration[]) {
+  // Branched before `getMigrationsTableSQL` can be asked about a dialect it has
+  // no answer for: there is no `CREATE TABLE` here, and a migration's Mongo
+  // half rides in `mongoUp`/`mongoDown` rather than in `up`/`down`.
+  if (config.type === DBType.MongoDB) {
+    return runMongoMigrations(config, migrations);
+  }
+
   const client = new DBClient(config);
   try {
     const dbType = config.type;

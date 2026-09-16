@@ -18,8 +18,21 @@ import {
 import { MetadataStorage } from "./model";
 import { getHooks, type HookType } from "./hooks";
 import { decrypt, encrypt } from "./utils/encryption";
+import {
+  mongoBulkCreate,
+  mongoCreate,
+  type MongoRepositoryHost,
+} from "./mongo-repository";
 
 type VersionOperation = "insert" | "update" | "delete";
+
+/**
+ * The property name a model's primary key is declared under.
+ *
+ * A convention rather than metadata: `ColumnConfig` carries no primary-key flag,
+ * so `id` is the key by definition across every backend.
+ */
+const ID_PROPERTY = "id";
 
 /**
  * How many key values go into one `IN (…)` when a relation is loaded.
@@ -547,7 +560,7 @@ export class Repository<T> {
     // is in sight — so it has to know the dialect from the outset.
     qb.withDialect(this.client.config.type);
     if (this.softDeleteField) {
-      qb.where(`${this.table}.${this.softDeleteColumn} IS NULL`);
+      qb.whereNull(`${this.table}.${this.softDeleteColumn}`);
     }
     // Lets `find().withRelations(...)` work: the builder records the paths and
     // calls back here to load them, since only the repository has the model
@@ -575,7 +588,7 @@ export class Repository<T> {
     // decrypted) and calls back into `loadRelations` before writing the cache,
     // so a cached entry holds the relations a later hit is asked for.
     const result = await this.find()
-      .where(`${this.table}.id = ?`, id)
+      .whereEq(`${this.table}.id`, id)
       .limit(1)
       .withRelations(options.relations ?? [])
       .execute(client, this.cache!, cacheKey);
@@ -729,34 +742,79 @@ export class Repository<T> {
     });
   }
 
-  private async _create(
-    entity: Partial<T>,
-    options: { relations?: string[] },
-    client: DBClient,
-  ): Promise<T> {
-    const start = performance.now();
-    this.logger.logDebug(
-      `Creating ${this.table} with data: ${JSON.stringify(entity)}`,
-    );
-    this.validate(entity);
-
+  /**
+   * Fills in the columns a create writes that the caller did not supply.
+   *
+   * Shared by the SQL and MongoDB insert paths, so the two cannot drift on
+   * which defaults a new row carries.
+   *
+   * @param entity The entity as the create hooks left it.
+   * @returns A copy carrying the seeded timestamps and optimistic lock.
+   */
+  private seedCreateDefaults(entity: Partial<T>): Record<string, any> {
     const timestamps = this.timestampsConfig;
-    const entityWithTimestamps = { ...entity } as Record<string, any>;
-    if (timestamps?.createdAt && !entityWithTimestamps[timestamps.createdAt]) {
-      entityWithTimestamps[timestamps.createdAt] = new Date().toISOString();
+    const row = { ...entity } as Record<string, any>;
+    if (timestamps?.createdAt && !row[timestamps.createdAt]) {
+      row[timestamps.createdAt] = new Date().toISOString();
     }
-    if (timestamps?.updatedAt && !entityWithTimestamps[timestamps.updatedAt]) {
-      entityWithTimestamps[timestamps.updatedAt] = new Date().toISOString();
+    if (timestamps?.updatedAt && !row[timestamps.updatedAt]) {
+      row[timestamps.updatedAt] = new Date().toISOString();
     }
     // Seed the optimistic lock so the first `update()` has a version to match
     // on; without this the column stays NULL and `version = NULL` never
     // matches, which makes every update look like a conflict.
     if (
       this.optimisticLockField &&
-      entityWithTimestamps[this.optimisticLockField] === undefined
+      row[this.optimisticLockField] === undefined
     ) {
-      entityWithTimestamps[this.optimisticLockField] = 1;
+      row[this.optimisticLockField] = 1;
     }
+    return row;
+  }
+
+  /**
+   * The repository's own members, narrowed to what the MongoDB write bodies
+   * need. Built here rather than handed over as `this` because most of what
+   * they reach for is private, and because the object literal is a single
+   * readable list of exactly what the Mongo path depends on.
+   */
+  private get mongoCtx(): MongoRepositoryHost {
+    return {
+      table: this.table,
+      columns: this.columns,
+      idProperty: ID_PROPERTY,
+      idColumn: this.columns[ID_PROPERTY]?.name ?? ID_PROPERTY,
+      autoIncrementField: this.autoIncrementField,
+      logger: this.logger,
+      validate: (entity) => this.validate(entity),
+      seedCreateDefaults: (entity) => this.seedCreateDefaults(entity as Partial<T>),
+      processForSave: (entity) => this.processForSave(entity),
+      processForLoad: (row) => this.processForLoad(row),
+      findOne: (id, options, client) => this.findOne(id, options, client),
+      loadRelations: (rows, relations, client) =>
+        this.loadRelations(rows, relations, client),
+      invalidateRowCache: (id) => this.invalidateRowCache(id),
+      invalidateTableCache: () => this.invalidateTableCache(),
+      writeThroughRow: (id, row) => this.writeThroughRow(id, row),
+    };
+  }
+
+  private async _create(
+    entity: Partial<T>,
+    options: { relations?: string[] },
+    client: DBClient,
+  ): Promise<T> {
+    if (this.getDBType(client) === DBType.MongoDB) {
+      return mongoCreate(this.mongoCtx, entity as Record<string, any>, options, client) as Promise<T>;
+    }
+
+    const start = performance.now();
+    this.logger.logDebug(
+      `Creating ${this.table} with data: ${JSON.stringify(entity)}`,
+    );
+    this.validate(entity);
+
+    const entityWithTimestamps = this.seedCreateDefaults(entity);
 
     // Encrypt after the timestamp and lock columns are in place, so everything
     // bound below passes through the same coercion.
@@ -876,6 +934,15 @@ export class Repository<T> {
     options: { relations?: string[]; batchSize?: number },
     client: DBClient,
   ): Promise<T[]> {
+    if (this.getDBType(client) === DBType.MongoDB) {
+      return mongoBulkCreate(
+        this.mongoCtx,
+        entities as Record<string, any>[],
+        options,
+        client,
+      ) as Promise<T[]>;
+    }
+
     const start = performance.now();
     this.logger.logDebug(
       `Bulk creating ${entities.length} ${this.table} entities`,
@@ -965,9 +1032,9 @@ export class Repository<T> {
       );
       if (ids.length === 0) continue;
 
-      const queryBuilder = this.find().where(
-        `${this.table}.${pkColumn} IN (${ids.map(() => "?").join(", ")})`,
-        ...ids,
+      const queryBuilder = this.find().whereIn(
+        `${this.table}.${pkColumn}`,
+        ids,
       );
       const fetched = await queryBuilder.execute(client);
       await this.loadRelations(fetched, options.relations, client);
@@ -1440,7 +1507,7 @@ export class Repository<T> {
     if (keys.length === 0) return null;
     const qb = this.find();
     for (const key of keys) {
-      qb.where(`${this.columns[key]?.name ?? key} = ?`, values[key]);
+      qb.whereEq(this.columns[key]?.name ?? key, values[key]);
     }
     const found = await qb.limit(1).execute(client);
     return (found[0] as T) ?? null;
@@ -1630,10 +1697,7 @@ export class Repository<T> {
     const rows: any[] = [];
     for (const chunk of chunked(values, RELATION_BATCH_SIZE)) {
       const qb = this.find();
-      qb.where(
-        `${this.table}.${column} IN (${chunk.map(() => "?").join(", ")})`,
-        ...chunk,
-      );
+      qb.whereIn(`${this.table}.${column}`, chunk);
       rows.push(...(await qb.execute(client)));
     }
     return rows;
@@ -1870,7 +1934,12 @@ export class Repository<T> {
     // A `Date` is normalised per dialect rather than to ISO for all of them,
     // because MySQL and MariaDB reject the ISO form outright. @see
     // sanitizeSqlValue for both reasons.
+    //
+    // MongoDB is the exception in the other direction: it has a native date
+    // type, and an ISO string would both fail a `{bsonType: "date"}` validator
+    // and defeat every range query that could have used an index.
     const dbType = this.getDBType();
+    if (dbType === DBType.MongoDB) return processed;
     for (const key of Object.keys(processed)) {
       if (processed[key] instanceof Date) {
         processed[key] = sanitizeSqlValue(processed[key], dbType);
@@ -1924,9 +1993,9 @@ export class Repository<T> {
     const qb = this.find();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === null) {
-        qb.whereNull(key);
+        qb.whereNull(this.columns[key]?.name ?? key);
       } else {
-        qb.where(`${this.columns[key]?.name} = ?`, value);
+        qb.whereEq(this.columns[key]?.name ?? key, value);
       }
     }
     // Safe to limit before loading: relations no longer multiply the parent
@@ -1948,9 +2017,9 @@ export class Repository<T> {
     const qb = this.find();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === null) {
-        qb.whereNull(key);
+        qb.whereNull(this.columns[key]?.name ?? key);
       } else {
-        qb.where(`${this.columns[key]?.name} = ?`, value);
+        qb.whereEq(this.columns[key]?.name ?? key, value);
       }
     }
     if (options.limit) qb.limit(options.limit);
@@ -1964,7 +2033,7 @@ export class Repository<T> {
   async count(conditions?: Partial<T>): Promise<number> {
     const qb = new QueryBuilder(this.table);
     if (this.softDeleteField) {
-      qb.where(`${this.softDeleteColumn} IS NULL`);
+      qb.whereNull(this.softDeleteColumn!);
     }
     if (conditions) {
       for (const [key, value] of Object.entries(conditions)) {
@@ -1973,7 +2042,7 @@ export class Repository<T> {
         if (value === null) {
           qb.whereNull(this.columns[key]?.name ?? key);
         } else if (value !== undefined) {
-          qb.where(`${this.columns[key]?.name} = ?`, value);
+          qb.whereEq(this.columns[key]?.name ?? key, value);
         }
       }
     }
@@ -1993,12 +2062,12 @@ export class Repository<T> {
 
     const qb = new QueryBuilder(this.table);
     if (this.softDeleteField) {
-      qb.where(`${this.softDeleteColumn} IS NULL`);
+      qb.whereNull(this.softDeleteColumn!);
     }
     if (conditions) {
       for (const [key, value] of Object.entries(conditions)) {
         if (value !== undefined && value !== null) {
-          qb.where(`${this.columns[key]?.name} = ?`, value);
+          qb.whereEq(this.columns[key]?.name ?? key, value);
         }
       }
     }
@@ -2077,7 +2146,7 @@ export class Repository<T> {
 
     const qb = new QueryBuilder(this.table);
     if (this.softDeleteField) {
-      qb.where(`${this.softDeleteColumn} IS NULL`);
+      qb.whereNull(this.softDeleteColumn!);
     }
     qb.select(...selectParts);
     const results = await qb.execute(this.client);
@@ -2105,9 +2174,9 @@ export class Repository<T> {
     if (options.where) {
       for (const [key, value] of Object.entries(options.where)) {
         if (value === null) {
-          qb.whereNull(key);
+          qb.whereNull(this.columns[key]?.name ?? key);
         } else {
-          qb.where(`${this.columns[key]?.name} = ?`, value);
+          qb.whereEq(this.columns[key]?.name ?? key, value);
         }
       }
     }
@@ -2117,9 +2186,9 @@ export class Repository<T> {
       const colName = this.columns[field]?.name || field;
       const dir = options.orderBy?.direction || "ASC";
       if (direction === "forward") {
-        qb.where(`${colName} ${dir === "ASC" ? ">" : "<"} ?`, value);
+        qb.whereCompare(colName, dir === "ASC" ? ">" : "<", value);
       } else {
-        qb.where(`${colName} ${dir === "ASC" ? "<" : ">"} ?`, value);
+        qb.whereCompare(colName, dir === "ASC" ? "<" : ">", value);
       }
       if (options.orderBy) {
         qb.orderBy(colName, options.orderBy.direction);
@@ -2159,7 +2228,7 @@ export class Repository<T> {
   async exists(conditions?: Partial<T>): Promise<boolean> {
     const qb = new QueryBuilder(this.table);
     if (this.softDeleteField) {
-      qb.where(`${this.softDeleteColumn} IS NULL`);
+      qb.whereNull(this.softDeleteColumn!);
     }
     if (conditions) {
       for (const [key, value] of Object.entries(conditions)) {
@@ -2168,7 +2237,7 @@ export class Repository<T> {
         if (value === null) {
           qb.whereNull(this.columns[key]?.name ?? key);
         } else if (value !== undefined) {
-          qb.where(`${this.columns[key]?.name} = ?`, value);
+          qb.whereEq(this.columns[key]?.name ?? key, value);
         }
       }
     }
@@ -2246,7 +2315,7 @@ export class Repository<T> {
     const colName = this.columns[column]?.name || column;
     const qb = new QueryBuilder(this.table);
     if (this.softDeleteField) {
-      qb.where(`${this.softDeleteColumn} IS NULL`);
+      qb.whereNull(this.softDeleteColumn!);
     }
     qb.select(`COUNT(DISTINCT ${colName}) AS __cnt`);
     const results = await qb.execute(this.client);
@@ -2296,7 +2365,7 @@ export class Repository<T> {
     const qb = new QueryBuilder(this.table);
     qb.select(colName);
     if (this.softDeleteField) {
-      qb.where(`${this.softDeleteColumn} IS NULL`);
+      qb.whereNull(this.softDeleteColumn!);
     }
     const results = await qb.execute(this.client);
     return results.map((r: any) => r[colName]);
@@ -2311,7 +2380,7 @@ export class Repository<T> {
     const qb = new QueryBuilder<T>(this.table);
     qb.select(...colNames);
     if (this.softDeleteField) {
-      qb.where(`${this.softDeleteColumn} IS NULL`);
+      qb.whereNull(this.softDeleteColumn!);
     }
     const results = await this.withRowTransform(qb).execute(this.client);
     return results as Partial<T>[];
@@ -2584,7 +2653,7 @@ export class Repository<T> {
   ): Promise<T | null> {
     const client = _client || this.client;
     const dbType = this.getDBType(client);
-    const qb = this.find().where("id = ?", id).limit(1);
+    const qb = this.find().whereEq("id", id).limit(1);
     if (dbType !== DBType.SQLite && dbType !== DBType.MSSQL) {
       // T-SQL has no `FOR UPDATE`; its equivalent is a table hint
       // (`WITH (UPDLOCK)`), which this builder cannot express. Skipping the
@@ -2631,9 +2700,9 @@ export class Repository<T> {
     if (conditions) {
       for (const [key, value] of Object.entries(conditions)) {
         if (value === null) {
-          qb.whereNull(key);
+          qb.whereNull(this.columns[key]?.name ?? key);
         } else {
-          qb.where(`${this.columns[key]?.name} = ?`, value);
+          qb.whereEq(this.columns[key]?.name ?? key, value);
         }
       }
     }

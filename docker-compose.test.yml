@@ -106,6 +106,57 @@ services:
       start_period: 20s
     networks: [stabilize-test]
 
+  mongo:
+    image: mongo:7
+    container_name: stabilize-test-mongo
+    # A single-node *replica set* rather than the standalone default. MongoDB
+    # only supports transactions on a replica set or mongos, and the ORM wraps
+    # every write — including create() — in one. A standalone would accept the
+    # connection, answer every read, and then fail every write with a bare
+    # IllegalOperation.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "57017:27017"
+    healthcheck:
+      # The set must be initiated before it will serve transactions and there is
+      # no init container here to do it, so the first probe does it and then
+      # rethrows — `rs.status()` throws while no config exists, which leaves the
+      # container unhealthy for exactly one interval. The next probe sees a
+      # healthy set. Self-contained, and no dependency cycle.
+      #
+      # The member registers itself as 127.0.0.1:27017 — the *container's* port.
+      # A driver doing topology discovery is handed that address and tries to
+      # reach it from the host, where nothing is listening. Connect with
+      # `directConnection=true` to skip discovery; see tests/integration.mongo.test.ts.
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id:\"rs0\",members:[{_id:0,host:\"127.0.0.1:27017\"}]}); throw e }'",
+        ]
+      interval: 2s
+      timeout: 10s
+      retries: 60
+      start_period: 5s
+  mongo-standalone:
+    # Deliberately *not* a replica set, and here for one reason: to pin the
+    # failure mode a standalone produces. It accepts the connection, answers
+    # every read, and then rejects every write — because the ORM wraps each one
+    # in a transaction. Without a server like this the behaviour could only be
+    # asserted from documentation rather than observed.
+    image: mongo:7
+    container_name: stabilize-test-mongo-standalone
+    ports:
+      - "57018:27017"
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 3s
+    tmpfs:
+      - /data/db
+    networks: [stabilize-test]
+
 networks:
   stabilize-test:
     driver: bridge

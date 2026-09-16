@@ -12,6 +12,7 @@ import {
   createTableIfNotExistsSQL,
   quoteIdentifier,
 } from "./migrations";
+import { mongoAutoMigrate } from "./mongo-schema";
 
 async function tableExists(db: DBClient, table: string): Promise<boolean> {
   switch (db.config.type) {
@@ -288,6 +289,15 @@ export async function autoMigrate(
   models: any | any[],
 ): Promise<void> {
   const list = Array.isArray(models) ? models : [models];
+
+  // Returned before the `dialect` union below is computed, so no SQL path is
+  // reachable for a MongoDB client. MongoDB has no `ADD COLUMN` and no
+  // `CREATE TABLE`; its equivalent is a collection plus a validator, and it
+  // lives in `mongo-schema` rather than in a branch of this function.
+  if (db.config.type === DBType.MongoDB) {
+    return mongoAutoMigrate(db, list);
+  }
+
   // Every identifier this file emits goes through `quoteIdentifier`, so the
   // DDL parses on MySQL-family servers (backticks) as well as the rest (`"`).
   // @see quoteIdentifier for why the two spellings are not interchangeable.

@@ -9,6 +9,7 @@ export enum DBType {
   MySQL = "mysql",
   SQLite = "sqlite",
   MSSQL = "mssql",
+  MongoDB = "mongodb",
 }
 
 export enum LogLevel {
@@ -51,6 +52,24 @@ export interface DBConfig {
   retryAttempts?: number;
   retryDelay?: number;
   maxJitter?: number;
+  /**
+   * The MongoDB database to operate on.
+   *
+   * Only meaningful for `DBType.MongoDB`. Every other backend takes its
+   * database from the connection string, but a mongo URI may legitimately omit
+   * one (and often does in development), so it is accepted separately as well.
+   * When both are present the URI's own path wins and this is ignored.
+   */
+  database?: string;
+  /**
+   * Extra options handed verbatim to the MongoDB driver's `MongoClient`.
+   *
+   * For `DBType.MongoDB` only. This is the escape hatch for driver settings the
+   * ORM has no opinion about — `tls`, `authSource`, `maxPoolSize`, `retryWrites`
+   * and the rest — without the ORM having to model, and stay current with, the
+   * driver's full option surface.
+   */
+  mongoOptions?: Record<string, unknown>;
 }
 
 export interface CacheConfig {
@@ -88,10 +107,44 @@ export interface CacheStats {
   keys: number;
 }
 
+/**
+ * One schema change against MongoDB, as data rather than as a closure.
+ *
+ * A discriminated union so a generated migration is serializable and assertable
+ * without a server — the same reason `buildLimitClause` and
+ * `buildMSSQLUpsertSQL` are pure. It lives here rather than beside the schema
+ * derivation because `Migration` needs it, and `mongo-schema` already imports
+ * from this module; declaring it there would make the two files import each
+ * other.
+ */
+export type MongoStep =
+  | { kind: "createCollection"; collection: string; validator?: any }
+  | {
+      kind: "createIndex";
+      collection: string;
+      spec: Record<string, 1 | -1>;
+      options?: Record<string, any>;
+    }
+  | { kind: "dropIndex"; collection: string; name: string }
+  | { kind: "collMod"; collection: string; validator: any }
+  | { kind: "dropCollection"; collection: string }
+  | { kind: "createCounter"; collection: string };
+
 export interface Migration {
   name: string;
   up: string[];
   down: string[];
+  /**
+   * The MongoDB steps this migration applies.
+   *
+   * A sidecar rather than a replacement for `up`/`down`, because those are SQL
+   * and `tests/migrations.test.ts` asserts their exact strings. A migration
+   * generated for a SQL target leaves both of these undefined, and
+   * `runMigrations` never reads them.
+   */
+  mongoUp?: MongoStep[];
+  /** The MongoDB inverse of {@link mongoUp}. */
+  mongoDown?: MongoStep[];
 }
 
 export class StabilizeError extends Error {

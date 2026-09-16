@@ -171,14 +171,21 @@ export class Stabilize {
   }> {
     const start = performance.now();
     try {
-      const results = await this.client.query("SELECT 1 AS ok");
+      // MongoDB has no `SELECT 1`; `ping` is its equivalent liveness command.
+      // Both are wrapped the same way so a slow or unreachable server lands in
+      // the same catch rather than escaping as a different error shape.
+      const isMongo = this.client.config.type === DBType.MongoDB;
+      const healthy = isMongo
+        ? (await this.client.mongoCommand({ ping: 1 })).ok === 1
+        : (await this.client.query("SELECT 1 AS ok")).length > 0;
+
       const cacheStatus = this.cache
         ? (await this.cache.get("healthcheck"))
           ? "connected"
           : "connected (miss)"
         : "disabled";
       return {
-        status: results.length > 0 ? "healthy" : "unhealthy",
+        status: healthy ? "healthy" : "unhealthy",
         database: this.client.config.type,
         latencyMs: Number((performance.now() - start).toFixed(2)),
         cacheStatus,
@@ -249,6 +256,10 @@ export class Stabilize {
         total: pool.size ?? 0,
       };
     }
+    // MongoDB and SQLite land here deliberately. Neither exposes a pool whose
+    // occupancy can be read synchronously — the mongo driver's pool is internal
+    // and per-server, and SQLite has no pool at all — so the sentinel is the
+    // honest answer rather than a number invented to fill the shape.
     return { active: -1, idle: -1, total: -1 };
   }
 }

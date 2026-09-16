@@ -61,7 +61,7 @@
   ],
   "scripts": {
     "build": "bun run build:js && bun run build:types",
-    "build:js": "bun build index.ts repository.ts query-builder.ts client.ts cache.ts model.ts types.ts hooks.ts logger.ts migrations.ts auto-migrate.ts utils/encryption.ts --outdir dist --target bun --sourcemap=external --minify",
+    "build:js": "bun build index.ts repository.ts query-builder.ts client.ts cache.ts model.ts types.ts hooks.ts logger.ts migrations.ts auto-migrate.ts mongo-query.ts mongo-repository.ts mongo-schema.ts mongo-migrate.ts utils/encryption.ts --outdir dist --target bun --sourcemap=external --minify --external mongodb",
     "build:types": "bun tsc -p tsconfig.build.json",
     "prepublishOnly": "bun run build",
     "typecheck": "bun tsc --noEmit",
@@ -103,6 +103,9 @@
     "mssql": "^12.7.2",
     "mysql2": "^3.15.2",
     "pg": "^8.16.3"
+  },
+  "optionalDependencies": {
+    "mongodb": "^6.20.0"
   },
   "peerDependencies": {
     "bun": ">=1.0.0"

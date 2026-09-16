@@ -206,6 +206,122 @@ interface MSSQLHandle {
 }
 
 /**
+ * The shape of the MongoDB handles this client stores.
+ *
+ * Structural for the same reason `MSSQLHandle` is — naming the driver's own
+ * types would emit an import of the `mongodb` package into `client.d.ts`, and
+ * every consumer of the published package would then need declarations for a
+ * driver most of them never install.
+ *
+ * Unlike mssql, though, the driver *does* ship its own declarations, so there
+ * is deliberately no ambient shim module here: one would shadow the real types
+ * for the ORM build and for any consumer that does use the driver.
+ *
+ * A `MongoClient` is recognised by `db`, a `ClientSession` by `withTransaction`.
+ */
+interface MongoHandle {
+  connect?: () => Promise<unknown>;
+  close?: () => Promise<unknown>;
+  db?: (name?: string) => MongoDbHandle;
+  startSession?: () => MongoSessionHandle;
+}
+
+/** A `ClientSession`, which is what an open transaction actually is. */
+interface MongoSessionHandle {
+  withTransaction?: (...args: any[]) => any;
+  endSession?: () => Promise<unknown>;
+}
+
+/** A `Db` — the handle collections are read from. */
+interface MongoDbHandle {
+  collection?: (name: string) => MongoCollectionHandle;
+  command?: (
+    command: Record<string, unknown>,
+    options?: Record<string, unknown>,
+  ) => Promise<any>;
+  listCollections?: (...args: any[]) => MongoCursorHandle;
+  createCollection?: (...args: any[]) => Promise<unknown>;
+  admin?: () => { command: (command: Record<string, unknown>) => Promise<any> };
+}
+
+/** A `Collection`. Only the members the ORM actually reaches for. */
+interface MongoCollectionHandle {
+  find: (...args: any[]) => MongoCursorHandle;
+  findOne: (...args: any[]) => Promise<any>;
+  insertOne: (...args: any[]) => Promise<MongoUpdateResult>;
+  insertMany: (...args: any[]) => Promise<MongoUpdateResult>;
+  updateOne: (...args: any[]) => Promise<MongoUpdateResult>;
+  updateMany: (...args: any[]) => Promise<MongoUpdateResult>;
+  deleteOne: (...args: any[]) => Promise<MongoUpdateResult>;
+  deleteMany: (...args: any[]) => Promise<MongoUpdateResult>;
+  countDocuments: (...args: any[]) => Promise<number>;
+  distinct: (...args: any[]) => Promise<any[]>;
+  aggregate: (...args: any[]) => MongoCursorHandle;
+  findOneAndUpdate: (...args: any[]) => Promise<any>;
+  bulkWrite: (...args: any[]) => Promise<MongoUpdateResult>;
+  createIndex: (...args: any[]) => Promise<unknown>;
+  listIndexes: (...args: any[]) => MongoCursorHandle;
+  drop?: (...args: any[]) => Promise<unknown>;
+  indexes?: (...args: any[]) => Promise<any[]>;
+}
+
+/** A `FindCursor` or `AggregationCursor`. */
+interface MongoCursorHandle {
+  toArray: () => Promise<any[]>;
+  sort?: (...args: any[]) => MongoCursorHandle;
+  skip?: (...args: any[]) => MongoCursorHandle;
+  limit?: (...args: any[]) => MongoCursorHandle;
+  project?: (...args: any[]) => MongoCursorHandle;
+  hasNext?: () => Promise<boolean>;
+  next?: () => Promise<any>;
+  close?: () => Promise<unknown>;
+}
+
+/** What a mongo write reports back. Field-for-field the driver's own result. */
+interface MongoUpdateResult {
+  acknowledged?: boolean;
+  matchedCount?: number;
+  modifiedCount?: number;
+  upsertedCount?: number;
+  upsertedId?: any;
+  insertedCount?: number;
+  deletedCount?: number;
+}
+
+/**
+ * Handles whose replica-set support has already been probed.
+ *
+ * A transaction-bound client shares its parent's `MongoClient` object, so
+ * without this the probe would run again on every transaction — and the probe
+ * is a round trip on the hottest path in the library.
+ */
+const replicaSetProbed = new WeakSet<object>();
+
+/**
+ * Loads the MongoDB driver, which is an optional dependency.
+ *
+ * The specifier is held in a variable on purpose. A literal dynamic import is
+ * resolved statically by the bundler and by `tsc`, neither of which should
+ * require the driver to be present for a build or typecheck of the SQL
+ * backends.
+ *
+ * @returns The driver module.
+ * @throws StabilizeError when the driver is not installed.
+ */
+async function loadMongoDriver(): Promise<any> {
+  const specifier = "mongodb";
+  try {
+    return await import(specifier);
+  } catch {
+    throw new StabilizeError(
+      "The MongoDB driver is not installed. DBType.MongoDB requires it as an " +
+        "optional peer: install it with `bun add mongodb` or `npm install mongodb`.",
+      "MONGO_DRIVER_MISSING",
+    );
+  }
+}
+
+/**
  * Provides a unified database client for interacting with PostgreSQL, MySQL, and SQLite.
  */
 export class DBClient {
@@ -215,7 +331,8 @@ export class DBClient {
     | mysql.Pool
     | PoolClient
     | mysql.PoolConnection
-    | MSSQLHandle;
+    | MSSQLHandle
+    | MongoHandle;
   private logger: Logger;
   public readonly config: DBConfig;
   private retryAttempts: number;
@@ -229,6 +346,24 @@ export class DBClient {
    */
   private mssqlConnectPromise: Promise<void> | null = null;
 
+  /**
+   * The in-flight connect on the mongo client, held for the same reason as
+   * `mssqlConnectPromise`. It resolves to the connected handle so that callers
+   * that need to reach a collection do not have to re-derive it.
+   */
+  private mongoConnectPromise: Promise<MongoHandle> | null = null;
+
+  /**
+   * The mongo session every statement on this client should run inside.
+   *
+   * Kept beside `client` rather than *as* `client`, unlike mssql. A mongo
+   * transaction is not a different connection the way `sql.Transaction` is: the
+   * commands still go to the same `MongoClient`, and the session is passed
+   * alongside them as an option. Storing it separately is what lets a
+   * transaction-bound client still resolve its parent's collections.
+   */
+  private mongoSession: MongoSessionHandle | null = null;
+
   private preparedStatements: Map<string, Statement> = new Map();
   public isTransactionClient: boolean = false;
 
@@ -237,7 +372,10 @@ export class DBClient {
    * @param config The database configuration object.
    * @param logger Optional logger instance. Uses StabilizeLogger if not provided.
    * @param existingClient Optional existing transaction client. For SQL Server
-   *   this is the `sql.Transaction` the statements should run inside.
+   *   this is the `sql.Transaction` the statements should run inside; for
+   *   MongoDB it is the parent `MongoClient`, shared with the session below.
+   * @param mongoSession Optional session that scopes statements to a
+   *   transaction. Only MongoDB uses it.
    */
   constructor(
     config: DBConfig,
@@ -246,7 +384,9 @@ export class DBClient {
       | PoolClient
       | mysql.PoolConnection
       | MSSQLHandle
+      | MongoHandle
       | null = null,
+    mongoSession: MongoSessionHandle | null = null,
   ) {
     this.config = config;
     this.logger = logger;
@@ -257,6 +397,7 @@ export class DBClient {
     if (existingClient) {
       this.client = existingClient;
       this.isTransactionClient = true;
+      this.mongoSession = mongoSession;
     } else {
       this.initializeClient(config);
     }
@@ -283,7 +424,198 @@ export class DBClient {
       // every driver. `ensureMSSQLConnected` opens it on first use instead.
       this.client = new sql.ConnectionPool(config.connectionString);
       this.logger.logDebug(`Initialized MSSQL Pool client.`);
+    } else if (config.type === DBType.MongoDB) {
+      // Same constraint as mssql, one step worse: the driver is an optional
+      // dependency, so reaching it needs `await import()` — which cannot happen
+      // from a constructor either. `ensureMongoConnected` does both the import
+      // and the connect on first use and fills `client` in then. Nothing may
+      // touch `this.client` for a mongo config before awaiting it.
+      this.client = null as unknown as MongoHandle;
+      this.logger.logDebug(`Deferred MongoDB client initialization.`);
     }
+  }
+
+  /**
+   * Opens the mongo client, once, on first use.
+   *
+   * Performs the lazy `import()` of the optional driver and then `connect()`,
+   * mirroring `ensureMSSQLConnected`. The promise is memoised so concurrent
+   * first queries share one connection attempt.
+   *
+   * @returns The connected mongo handle.
+   * @throws StabilizeError when the driver is absent or a handle is malformed.
+   */
+  private async ensureMongoConnected(): Promise<MongoHandle> {
+    if (!this.mongoConnectPromise) {
+      this.mongoConnectPromise = this.openMongoClient();
+    }
+    return this.mongoConnectPromise;
+  }
+
+  /** Builds and connects the mongo client. See `ensureMongoConnected`. */
+  private async openMongoClient(): Promise<MongoHandle> {
+    let handle = this.client as MongoHandle | null;
+
+    if (!handle || typeof handle.db !== "function") {
+      const driver = await loadMongoDriver();
+      const options: Record<string, unknown> = {
+        ...(this.config.mongoOptions ?? {}),
+      };
+      // The URI's own database wins when it has one; the driver only consults
+      // `dbName` when the path is empty.
+      if (this.config.database && !options.dbName) {
+        options.dbName = this.config.database;
+      }
+      handle = new driver.MongoClient(
+        this.config.connectionString,
+        options,
+      ) as MongoHandle;
+      this.client = handle;
+    }
+
+    if (typeof handle.connect === "function") {
+      await handle.connect();
+    }
+    this.logger.logDebug("MongoDB client connected.");
+    await this.assertReplicaSetOrExplained(handle);
+    return handle;
+  }
+
+  /**
+   * Warns, once per client, when the server cannot serve transactions.
+   *
+   * Every write in the ORM is wrapped in a transaction, and MongoDB only
+   * supports those on a replica set or sharded cluster. A standalone `mongod`
+   * accepts the connection, answers every read, and then rejects the first
+   * `startTransaction` with a bare `IllegalOperation` — so without this the
+   * failure surfaces as "create() does not work" with nothing pointing at the
+   * cause. A warning at connect time names it.
+   *
+   * Deliberately not fatal: reads work fine standalone, and refusing to connect
+   * would break the read-only use someone may legitimately have.
+   */
+  private async assertReplicaSetOrExplained(handle: MongoHandle): Promise<void> {
+    if (replicaSetProbed.has(handle)) return;
+    replicaSetProbed.add(handle);
+
+    const db = handle.db?.(this.config.database);
+    const admin = db?.admin?.();
+    if (!admin || typeof admin.command !== "function") return;
+
+    try {
+      const hello = await admin.command({ hello: 1 });
+      if (hello && !hello.setName && !hello.msg) {
+        this.logger.logWarn(
+          "MongoDB is running as a standalone server. Transactions require a " +
+            "replica set, so every write — including create(), which the ORM " +
+            "always wraps in one — will fail with an IllegalOperation error. " +
+            "Start the server with --replSet and run rs.initiate(), or connect " +
+            "to an existing replica set.",
+        );
+      }
+    } catch (error) {
+      // A server that will not answer `hello` is not one this check can say
+      // anything useful about; the real error will surface on first use.
+      this.logger.logDebug(
+        `Could not probe MongoDB replica-set support: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Turns the driver's bare "Transaction numbers are only allowed on a replica
+   * set member or mongos" into an error that says what to do about it.
+   *
+   * Code 20 (`IllegalOperation`) is the one a standalone server returns from
+   * `startTransaction`. It is worth naming precisely because the symptom is so
+   * far from the cause: reads work, the connection is healthy, and only writes
+   * fail — because the ORM wraps every write in a transaction.
+   *
+   * @param error Whatever the driver threw.
+   * @returns A StabilizeError preserving the original as `cause`.
+   */
+  private explainMongoTransactionFailure(error: unknown): StabilizeError {
+    const code = (error as { code?: number })?.code;
+    const message = (error as Error)?.message ?? String(error);
+
+    // The infrastructure signature is looked for *first*, and deliberately not
+    // after the pass-through below. The executor family wraps every driver
+    // failure in a `MONGO_ERROR` whose own `code` is a string, so by the time a
+    // code-20 rejection gets here the number is gone and the driver's wording
+    // survives only inside the wrapper's message. Checking `instanceof` first
+    // would hand that wrapper straight back and report a standalone server as a
+    // generic mongo error.
+    if (code === 20 || /replica set|mongos/i.test(message)) {
+      return new StabilizeError(
+        "MongoDB transactions require a replica set or sharded cluster, and " +
+          "this server is a standalone. Every write goes through a transaction, " +
+          "so start the server with --replSet and run rs.initiate() (or point " +
+          `the connection at an existing replica set). Driver said: ${message}`,
+        "TX_ERROR",
+        error as Error,
+      );
+    }
+
+    // Anything the ORM has already classified — a validation failure, an
+    // optimistic-lock conflict, a row that is not there, or a write the driver
+    // refused — is the answer, and the four SQL branches all let theirs through
+    // untouched. Rewriting it as a transaction failure gave the caller the
+    // wrong code to branch on and the wrong thing to go and look at: a payload
+    // that failed validation sent the reader to the server's replica-set
+    // config.
+    if (error instanceof StabilizeError) return error;
+
+    return new StabilizeError(message, "TX_ERROR", error as Error);
+  }
+
+  /**
+   * Resolves the database handle statements should be issued against.
+   * @returns The connected `Db`.
+   * @throws StabilizeError when the handle exposes no `db()`.
+   */
+  private async mongoDb(): Promise<MongoDbHandle> {
+    const handle = await this.ensureMongoConnected();
+    const db = handle.db?.(this.config.database);
+    if (!db) {
+      throw new StabilizeError(
+        "MongoDB client did not provide a database handle.",
+        "MONGO_ERROR",
+      );
+    }
+    return db;
+  }
+
+  /**
+   * The options every mongo command must carry.
+   *
+   * A transaction-bound client contributes its session here; a plain one
+   * contributes nothing. Threading it through every executor is what makes a
+   * repository write performed inside `transaction()` actually participate in
+   * it, rather than silently committing on its own.
+   */
+  private mongoOptions(): Record<string, unknown> {
+    return this.mongoSession ? { session: this.mongoSession } : {};
+  }
+
+  /**
+   * Rejects a SQL statement sent to a MongoDB client.
+   *
+   * There is no fifth branch to add to `query`: a mongo command is a document,
+   * not a string, so there is nothing for the SQL path to dispatch on. Failing
+   * loudly here means a caller who reached for `rawQuery` against mongo gets a
+   * sentence explaining why, rather than a driver-level parse error.
+   *
+   * @throws StabilizeError always, when this client is a mongo client.
+   */
+  private rejectSQLForMongo(): void {
+    throw new StabilizeError(
+      "Raw SQL is not available on MongoDB. The Mongo backend speaks commands " +
+        "and documents rather than statements, so rawQuery/rawExec and the " +
+        "query-builder's SQL-only clauses (join, union, whereRaw, orderByRaw, " +
+        "selectRaw, groupByRaw, having, whereExists) have no equivalent. Use " +
+        "the repository API or the query builder's structured methods instead.",
+      "MONGO_UNSUPPORTED",
+    );
   }
 
   /**
@@ -355,6 +687,7 @@ export class DBClient {
    * @throws StabilizeError if all retry attempts fail.
    */
   async query<T>(query: string, params: any[] = []): Promise<T[]> {
+    if (this.config.type === DBType.MongoDB) this.rejectSQLForMongo();
     const start = Date.now();
 
     // Only reads are retried. Every write in the ORM — insert, update, delete,
@@ -467,6 +800,45 @@ export class DBClient {
       }
     }
 
+    if (this.config.type === DBType.MongoDB) {
+      const handle = await this.ensureMongoConnected();
+      if (typeof handle.startSession !== "function") {
+        throw new StabilizeError(
+          "MongoDB client cannot start a session, so transactions are unavailable.",
+          "TX_ERROR",
+        );
+      }
+
+      const session = handle.startSession();
+      // The transaction-bound client keeps the parent's `MongoClient` and adds
+      // the session, because mongo commands carry a session rather than being
+      // sent through a different connection.
+      const txClient = new DBClient(this.config, this.logger, handle, session);
+      this.logger.logDebug("Starting MongoDB transaction.");
+
+      try {
+        // `withTransaction` rather than an explicit start/commit pair: it
+        // replays the callback when the server reports a transient error, which
+        // is exactly what a write conflict on a per-table counter document
+        // produces when two creates allocate ids at once. Reproducing that by
+        // hand would mean re-running caller code from inside this method.
+        return await session.withTransaction!(() => callback(txClient), {
+          readConcern: { level: "snapshot" },
+          writeConcern: { w: "majority" },
+        });
+      } catch (error) {
+        throw this.explainMongoTransactionFailure(error);
+      } finally {
+        // The session is a server-side resource and leaks if it is not ended,
+        // whether the transaction committed or not.
+        try {
+          await session.endSession?.();
+        } catch (endError) {
+          this.logger.logError(endError as Error);
+        }
+      }
+    }
+
     if (this.config.type === DBType.MSSQL) {
       // SQL Server has no `BEGIN`/`COMMIT` text: the transaction is a
       // server-side object opened on a borrowed pooled connection, and every
@@ -554,10 +926,20 @@ export class DBClient {
       // mysql pools expose — the generic branch below would silently skip it
       // and leave the sockets open.
       await (this.client as MSSQLHandle).close!();
+    } else if (
+      this.config.type === DBType.MongoDB &&
+      this.client &&
+      typeof (this.client as MongoHandle).close === "function"
+    ) {
+      // Same trap as mssql: a `MongoClient` is closed with `close()`. A client
+      // that was never used holds no handle at all, so the guard is on the
+      // function rather than the config.
+      await (this.client as MongoHandle).close!();
     } else if (this.client && "end" in this.client) {
       await (this.client as any).end();
     }
     this.client = null!;
+    this.mongoConnectPromise = null;
     this.logger.logInfo("Database connection closed");
   }
 
@@ -565,6 +947,7 @@ export class DBClient {
     query: string,
     params: any[] = [],
   ): Promise<{ affectedRows: number }> {
+    if (this.config.type === DBType.MongoDB) this.rejectSQLForMongo();
     const start = Date.now();
     let affectedRows = 0;
 
@@ -603,6 +986,7 @@ export class DBClient {
    * @returns Promise that resolves once the query is complete.
    */
   async migrationQuery(query: string, params: any[] = []): Promise<void> {
+    if (this.config.type === DBType.MongoDB) this.rejectSQLForMongo();
     const start = Date.now();
     if (this.client instanceof Database) {
       let stmt = this.preparedStatements.get(query);
@@ -624,5 +1008,336 @@ export class DBClient {
 
     const executionTime = Date.now() - start;
     this.logger.logQuery(query, params, executionTime);
+  }
+
+  // ---------------------------------------------------------------------------
+  // MongoDB executors
+  //
+  // A parallel family to query/queryExec/migrationQuery rather than a fifth
+  // branch inside them: those take a SQL string to dispatch on, and a mongo
+  // command is a document. Everything below funnels through `mongoRun` so that
+  // logging, session threading and error wrapping are written once.
+  //
+  // Reads are not retried the way `query` retries them. A transaction is
+  // already replayed wholesale by `withTransaction`, and outside one a mongo
+  // read failure is a topology problem that retrying three times will not fix.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Runs one mongo operation against a collection.
+   *
+   * @param label Short description used in logs and error messages.
+   * @param detail The filter, document or pipeline, for the log line.
+   * @param operation Receives the connected database handle.
+   * @returns Whatever the operation resolved to.
+   * @throws StabilizeError wrapping any driver failure.
+   */
+  private async mongoRun<T>(
+    label: string,
+    detail: unknown,
+    operation: (db: MongoDbHandle) => Promise<T>,
+  ): Promise<T> {
+    const start = Date.now();
+    try {
+      const db = await this.mongoDb();
+      const result = await operation(db);
+      this.logger.logQuery(label, [detail], Date.now() - start);
+      return result;
+    } catch (error) {
+      if (error instanceof StabilizeError) throw error;
+      this.logger.logError(error as Error);
+      throw new StabilizeError(
+        `MongoDB ${label} failed: ${(error as Error).message}`,
+        "MONGO_ERROR",
+        error as Error,
+      );
+    }
+  }
+
+  /**
+   * Resolves a collection, or throws if the handle has none.
+   * @param name The collection name.
+   * @param db The database handle.
+   */
+  private mongoCollection(
+    name: string,
+    db: MongoDbHandle,
+  ): MongoCollectionHandle {
+    const collection = db.collection?.(name);
+    if (!collection) {
+      throw new StabilizeError(
+        `MongoDB database handle did not provide collection '${name}'.`,
+        "MONGO_ERROR",
+      );
+    }
+    return collection;
+  }
+
+  /** Merges caller options with this client's session, when it has one. */
+  private withSession(
+    options: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return { ...options, ...this.mongoOptions() };
+  }
+
+  /** Reads every matching document. */
+  async mongoFind(
+    collection: string,
+    filter: Record<string, unknown> = {},
+    options: Record<string, unknown> = {},
+  ): Promise<any[]> {
+    return this.mongoRun("find", { collection, filter }, async (db) => {
+      const cursor = this.mongoCollection(collection, db).find(
+        filter,
+        this.withSession(options),
+      );
+      return (await cursor.toArray()) ?? [];
+    });
+  }
+
+  /** Reads the first matching document, or null. */
+  async mongoFindOne(
+    collection: string,
+    filter: Record<string, unknown> = {},
+    options: Record<string, unknown> = {},
+  ): Promise<any | null> {
+    return this.mongoRun("findOne", { collection, filter }, async (db) =>
+      this.mongoCollection(collection, db).findOne(
+        filter,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Inserts one document. */
+  async mongoInsertOne(
+    collection: string,
+    document: Record<string, unknown>,
+    options: Record<string, unknown> = {},
+  ): Promise<MongoUpdateResult> {
+    return this.mongoRun("insertOne", { collection }, async (db) =>
+      this.mongoCollection(collection, db).insertOne(
+        document,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /**
+   * Inserts many documents.
+   *
+   * `ordered: false` is deliberately *not* the default: a batch that fails
+   * halfway should leave the caller able to tell which half landed, and an
+   * unordered insert reports that only in aggregate.
+   */
+  async mongoInsertMany(
+    collection: string,
+    documents: Record<string, unknown>[],
+    options: Record<string, unknown> = {},
+  ): Promise<MongoUpdateResult> {
+    return this.mongoRun("insertMany", { collection, count: documents.length }, async (db) =>
+      this.mongoCollection(collection, db).insertMany(
+        documents,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Updates the first matching document. */
+  async mongoUpdateOne(
+    collection: string,
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options: Record<string, unknown> = {},
+  ): Promise<MongoUpdateResult> {
+    return this.mongoRun("updateOne", { collection, filter }, async (db) =>
+      this.mongoCollection(collection, db).updateOne(
+        filter,
+        update,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Updates every matching document. */
+  async mongoUpdateMany(
+    collection: string,
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options: Record<string, unknown> = {},
+  ): Promise<MongoUpdateResult> {
+    return this.mongoRun("updateMany", { collection, filter }, async (db) =>
+      this.mongoCollection(collection, db).updateMany(
+        filter,
+        update,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Deletes the first matching document. */
+  async mongoDeleteOne(
+    collection: string,
+    filter: Record<string, unknown> = {},
+    options: Record<string, unknown> = {},
+  ): Promise<MongoUpdateResult> {
+    return this.mongoRun("deleteOne", { collection, filter }, async (db) =>
+      this.mongoCollection(collection, db).deleteOne(
+        filter,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Deletes every matching document. */
+  async mongoDeleteMany(
+    collection: string,
+    filter: Record<string, unknown> = {},
+    options: Record<string, unknown> = {},
+  ): Promise<MongoUpdateResult> {
+    return this.mongoRun("deleteMany", { collection, filter }, async (db) =>
+      this.mongoCollection(collection, db).deleteMany(
+        filter,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Counts matching documents without materialising them. */
+  async mongoCount(
+    collection: string,
+    filter: Record<string, unknown> = {},
+    options: Record<string, unknown> = {},
+  ): Promise<number> {
+    return this.mongoRun("countDocuments", { collection, filter }, async (db) =>
+      this.mongoCollection(collection, db).countDocuments(
+        filter,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Lists the distinct values of a field. */
+  async mongoDistinct(
+    collection: string,
+    field: string,
+    filter: Record<string, unknown> = {},
+    options: Record<string, unknown> = {},
+  ): Promise<any[]> {
+    return this.mongoRun("distinct", { collection, field }, async (db) =>
+      this.mongoCollection(collection, db).distinct(
+        field,
+        filter,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Runs an aggregation pipeline. */
+  async mongoAggregate(
+    collection: string,
+    pipeline: Record<string, unknown>[],
+    options: Record<string, unknown> = {},
+  ): Promise<any[]> {
+    return this.mongoRun("aggregate", { collection, stages: pipeline.length }, async (db) => {
+      const cursor = this.mongoCollection(collection, db).aggregate(
+        pipeline,
+        this.withSession(options),
+      );
+      return (await cursor.toArray()) ?? [];
+    });
+  }
+
+  /**
+   * Applies an update and returns a document.
+   *
+   * The driver returns the document itself, not a `ModifyResult`, because
+   * `includeResultMetadata` has defaulted to false since driver 6 (NODE-3568).
+   * The return shape is whatever `returnDocument` asks for, so this deliberately
+   * does not normalise it — the caller that needs `$inc`'s new value and the one
+   * that needs the pre-image want different answers.
+   */
+  async mongoFindOneAndUpdate(
+    collection: string,
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options: Record<string, unknown> = {},
+  ): Promise<any> {
+    return this.mongoRun("findOneAndUpdate", { collection, filter }, async (db) =>
+      this.mongoCollection(collection, db).findOneAndUpdate(
+        filter,
+        update,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Runs a bulk write, for counter bumps and M2M syncs that need one trip. */
+  async mongoBulkWrite(
+    collection: string,
+    operations: Record<string, unknown>[],
+    options: Record<string, unknown> = {},
+  ): Promise<MongoUpdateResult> {
+    return this.mongoRun("bulkWrite", { collection, count: operations.length }, async (db) =>
+      this.mongoCollection(collection, db).bulkWrite(
+        operations,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Creates an index. */
+  async mongoCreateIndex(
+    collection: string,
+    spec: Record<string, unknown>,
+    options: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    return this.mongoRun("createIndex", { collection, spec }, async (db) =>
+      this.mongoCollection(collection, db).createIndex(
+        spec,
+        this.withSession(options),
+      ),
+    );
+  }
+
+  /** Lists a collection's indexes. */
+  async mongoListIndexes(collection: string): Promise<any[]> {
+    return this.mongoRun("listIndexes", { collection }, async (db) => {
+      const cursor = this.mongoCollection(collection, db).listIndexes();
+      return (await cursor.toArray()) ?? [];
+    });
+  }
+
+  /** Lists a database's collections. */
+  async mongoListCollections(): Promise<any[]> {
+    return this.mongoRun("listCollections", {}, async (db) => {
+      const cursor = db.listCollections?.();
+      if (!cursor) return [];
+      return (await cursor.toArray()) ?? [];
+    });
+  }
+
+  /**
+   * Runs a database command.
+   *
+   * The catch-all for operations with no collection to hang off — `collMod` to
+   * change a validator, `ping` for the health check, `hello` for topology.
+   *
+   * The command and the options are separate arguments, and the session belongs
+   * in the second: merged into the command document it becomes a field the
+   * server tries to serialise, and a `ClientSession` is not BSON.
+   */
+  async mongoCommand(
+    command: Record<string, unknown>,
+  ): Promise<any> {
+    return this.mongoRun("command", command, async (db) => {
+      if (!db.command) {
+        throw new StabilizeError(
+          "MongoDB database handle did not provide command().",
+          "MONGO_ERROR",
+        );
+      }
+      return db.command(command, this.mongoOptions());
+    });
   }
 }
