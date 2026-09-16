@@ -1143,11 +1143,18 @@ export class DBClient {
     );
   }
 
-  /** Updates the first matching document. */
+  /**
+   * Updates the first matching document.
+   *
+   * `update` also accepts a pipeline array. A pipeline is the only way to
+   * express a value computed from the document's own current contents — which
+   * is what `toggle()` needs, and there is no update operator that flips a
+   * field in place.
+   */
   async mongoUpdateOne(
     collection: string,
     filter: Record<string, unknown>,
-    update: Record<string, unknown>,
+    update: Record<string, unknown> | Record<string, unknown>[],
     options: Record<string, unknown> = {},
   ): Promise<MongoUpdateResult> {
     return this.mongoRun("updateOne", { collection, filter }, async (db) =>
@@ -1159,11 +1166,11 @@ export class DBClient {
     );
   }
 
-  /** Updates every matching document. */
+  /** Updates every matching document. @see mongoUpdateOne for the pipeline form. */
   async mongoUpdateMany(
     collection: string,
     filter: Record<string, unknown>,
-    update: Record<string, unknown>,
+    update: Record<string, unknown> | Record<string, unknown>[],
     options: Record<string, unknown> = {},
   ): Promise<MongoUpdateResult> {
     return this.mongoRun("updateMany", { collection, filter }, async (db) =>

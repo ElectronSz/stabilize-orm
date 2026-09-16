@@ -173,6 +173,110 @@ export interface MongoCollectionPlan {
 }
 
 /**
+ * Builds the `$jsonSchema` validator for a versioned model's history collection.
+ *
+ * The model's columns are described exactly as they are in the main collection —
+ * a history row *is* the row it recorded — with the audit columns the history
+ * writer adds appended.
+ *
+ * `valid_from` is both declared as a date and required, which is what gives the
+ * native-`Date` rule teeth: an ISO string satisfies no `bsonType: "date"` and is
+ * rejected by the server on insert, rather than quietly turning every "as of"
+ * range query into a comparison between strings.
+ *
+ * The model's own `required` columns are deliberately **not** required here.
+ * `validationLevel: "moderate"` is what keeps a row that predates a newly
+ * declared column updatable, and demanding that column of the history row too
+ * would then reject the *recording* of exactly the update the level exists to
+ * allow.
+ *
+ * @param columns The model's columns.
+ */
+export function buildHistoryValidator(
+  columns: Record<string, ColumnConfig>,
+): Record<string, any> {
+  const properties: Record<string, any> = {};
+
+  for (const [key, column] of Object.entries(columns)) {
+    // The primary key is a field here, unlike in the main collection: the
+    // document's `_id` is the pair that makes one version unique, so the row's
+    // own key has nowhere else to live.
+    properties[column.name ?? key] = mapColumnToBsonSchema(column);
+  }
+
+  properties.operation = { bsonType: "string" };
+  properties.version = { bsonType: ["int", "long", "double"] };
+  properties.valid_from = { bsonType: "date" };
+  properties.valid_to = { bsonType: "date" };
+  properties.modified_by = { bsonType: "string" };
+  properties.modified_at = { bsonType: "date" };
+
+  return {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["_id", "version", "valid_from"],
+      properties,
+    },
+  };
+}
+
+/**
+ * Derives the history collection a versioned model needs.
+ *
+ * The history lives beside the model rather than in it — one collection keyed by
+ * the row and the version — and has no model of its own, so `autoMigrate` is the
+ * only thing that can create it. A model that is not versioned derives nothing.
+ *
+ * Both indexes serve a read that exists: `{row, version}` is `history()` and the
+ * newest-version lookup `rollback` makes, and `{row, valid_from}` is the window
+ * `asOf` ranges over. Without the second one the window comparison still works
+ * and stops being a range scan of one row's versions.
+ *
+ * @param model The model to derive from.
+ * @returns The history collection plan, or null when the model is not versioned.
+ */
+export function planMongoHistoryCollection(
+  model: any,
+): MongoCollectionPlan | null {
+  const meta = MetadataStorage.getModelMetadata(model);
+  if (!meta?.tableName || !meta.versioned) return null;
+
+  const columns = meta.columns as Record<string, ColumnConfig>;
+  const idColumn = columns["id"]?.name ?? "id";
+
+  return {
+    collection: `${meta.tableName}_history`,
+    validator: buildHistoryValidator(columns),
+    indexes: [
+      { spec: { [idColumn]: 1, version: 1 }, options: {} },
+      { spec: { [idColumn]: 1, valid_from: 1 }, options: {} },
+    ],
+  };
+}
+
+/**
+ * Lists the history collections a model set needs.
+ *
+ * @param models The models being migrated.
+ */
+export function planMongoHistoryCollections(
+  models: any[],
+): MongoCollectionPlan[] {
+  const plans: MongoCollectionPlan[] = [];
+  const seen = new Set<string>();
+
+  for (const model of models) {
+    const plan = planMongoHistoryCollection(model);
+    if (plan && !seen.has(plan.collection)) {
+      seen.add(plan.collection);
+      plans.push(plan);
+    }
+  }
+
+  return plans;
+}
+
+/**
  * Derives everything a model needs in the database.
  *
  * Pure: no client, no server. That is what makes `generateMongoMigration` able
@@ -397,6 +501,7 @@ export async function mongoAutoMigrate(
     plans.push(plan);
   }
   plans.push(...planMongoLinkCollections(models));
+  plans.push(...planMongoHistoryCollections(models));
 
   for (const plan of plans) {
     await ensureCollection(db, plan);
@@ -435,23 +540,38 @@ export function generateMongoSteps(
   const plan = planMongoCollection(model);
   if (!plan) return [];
 
+  // A versioned model's history collection is part of what a migration brings
+  // into existence, so it travels with the collection it belongs to in both
+  // directions. Left out of the `down`, a dropped model would keep its audit
+  // trail.
+  const history = planMongoHistoryCollection(model);
+  const collections = history ? [plan, history] : [plan];
+
   if (direction === "down") {
     // Dropping the collection is the only inverse that is actually total: the
     // indexes and the validator go with it, so a re-`up` rebuilds from the
     // declaration rather than from whatever survived.
-    return [{ kind: "dropCollection", collection: plan.collection }];
+    return collections.map((each) => ({
+      kind: "dropCollection" as const,
+      collection: each.collection,
+    }));
   }
 
-  const steps: MongoStep[] = [
-    { kind: "createCollection", collection: plan.collection, validator: plan.validator },
-  ];
-  for (const index of plan.indexes) {
+  const steps: MongoStep[] = [];
+  for (const each of collections) {
     steps.push({
-      kind: "createIndex",
-      collection: plan.collection,
-      spec: index.spec,
-      options: index.options,
+      kind: "createCollection",
+      collection: each.collection,
+      validator: each.validator,
     });
+    for (const index of each.indexes) {
+      steps.push({
+        kind: "createIndex",
+        collection: each.collection,
+        spec: index.spec,
+        options: index.options,
+      });
+    }
   }
   return steps;
 }

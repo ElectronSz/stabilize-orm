@@ -19,8 +19,29 @@ import { MetadataStorage } from "./model";
 import { getHooks, type HookType } from "./hooks";
 import { decrypt, encrypt } from "./utils/encryption";
 import {
+  mongoAggregateRows,
+  mongoAsOf,
+  mongoAttachLinks,
   mongoBulkCreate,
+  mongoCountDistinct,
   mongoCreate,
+  mongoDeleteManyBy,
+  mongoDeleteRow,
+  mongoDetachLinks,
+  mongoFetchLinkedIds,
+  mongoFindLinks,
+  mongoHistory,
+  mongoIncrement,
+  mongoRandom,
+  mongoRecover,
+  mongoRestoreManyBy,
+  mongoRollback,
+  mongoToggle,
+  mongoTruncate,
+  mongoUpdate,
+  mongoUpdateMany,
+  mongoUpsertRow,
+  mongoWriteHistory,
   type MongoRepositoryHost,
 } from "./mongo-repository";
 
@@ -607,6 +628,9 @@ export class Repository<T> {
     if (!this.versioned)
       throw new StabilizeError("Model is not versioned", "VERSIONING_ERROR");
     const client = _client || this.client;
+    if (this.getDBType(client) === DBType.MongoDB) {
+      return mongoAsOf(this.mongoCtx, id, asOfDate, client) as Promise<T | null>;
+    }
     // Bind an ISO string rather than the `Date` itself: SQLite rejects a Date
     // as a parameter, so every `asOf` call used to throw there, and the
     // history timestamps are written as ISO strings anyway.
@@ -622,6 +646,9 @@ export class Repository<T> {
     if (!this.versioned)
       throw new StabilizeError("Model is not versioned", "VERSIONING_ERROR");
     const client = _client || this.client;
+    if (this.getDBType(client) === DBType.MongoDB) {
+      return mongoHistory(this.mongoCtx, id, client) as Promise<T[]>;
+    }
     return client.query<T>(
       `SELECT * FROM ${this.historyTable} WHERE id = ? ORDER BY version ASC`,
       [id],
@@ -636,6 +663,9 @@ export class Repository<T> {
     if (!this.versioned)
       throw new StabilizeError("Model is not versioned", "VERSIONING_ERROR");
     const client = _client || this.client;
+    if (this.getDBType(client) === DBType.MongoDB) {
+      return mongoRollback(this.mongoCtx, id, version, client) as Promise<T>;
+    }
     return client.transaction(async (txClient) => {
       const rows = await txClient.query<T>(
         `SELECT * FROM ${this.historyTable} WHERE id = ? AND version = ?${this.topOneClause(txClient)}`,
@@ -671,6 +701,16 @@ export class Repository<T> {
     user?: string,
   ) {
     if (!this.versioned) return;
+
+    if (this.getDBType(client) === DBType.MongoDB) {
+      return mongoWriteHistory(
+        this.mongoCtx,
+        entity as Record<string, any>,
+        operation,
+        client,
+        user,
+      );
+    }
 
     const propertyKeys = Object.keys(this.columns);
     const sqlColumnNames = propertyKeys.map((k) => this.columns[k]!.name);
@@ -785,8 +825,14 @@ export class Repository<T> {
       idProperty: ID_PROPERTY,
       idColumn: this.columns[ID_PROPERTY]?.name ?? ID_PROPERTY,
       autoIncrementField: this.autoIncrementField,
+      softDeleteField: this.softDeleteField,
+      softDeleteColumn: this.softDeleteColumn,
+      optimisticLockField: this.optimisticLockField,
+      optimisticLockColumn: this.optimisticLockColumn,
+      timestamps: this.timestampsConfig,
+      historyTable: this.historyTable,
       logger: this.logger,
-      validate: (entity) => this.validate(entity),
+      validate: (entity, skipRequired) => this.validate(entity, skipRequired),
       seedCreateDefaults: (entity) => this.seedCreateDefaults(entity as Partial<T>),
       processForSave: (entity) => this.processForSave(entity),
       processForLoad: (row) => this.processForLoad(row),
@@ -1150,6 +1196,10 @@ export class Repository<T> {
     before: T,
     client: DBClient,
   ): Promise<T> {
+    if (this.getDBType(client) === DBType.MongoDB) {
+      return mongoUpdate(this.mongoCtx, id, entity as Record<string, any>, before, client) as Promise<T>;
+    }
+
     const start = performance.now();
     this.logger.logDebug(`Updating ${this.table} with ID ${id}`);
     this.validate(entity, true);
@@ -1251,6 +1301,16 @@ export class Repository<T> {
     options: { batchSize?: number } = {},
     _client?: DBClient,
   ): Promise<void> {
+    // Each entry carries a raw SQL `WHERE` fragment and its parameters, and
+    // there is no MongoDB statement to translate them into — a filter is a
+    // document, not text. Refused before the transaction opens, since a session
+    // that can only fail is not worth starting.
+    if (this.getDBType(_client) === DBType.MongoDB) {
+      throw new StabilizeError(
+        `bulkUpdate() takes a raw SQL WHERE condition, which has no MongoDB equivalent. Use updateBy() with a condition object instead.`,
+        "MONGO_UNSUPPORTED",
+      );
+    }
     return (_client || this.client).transaction((txClient) =>
       this._bulkUpdate(updates, options, txClient),
     );
@@ -1393,63 +1453,81 @@ export class Repository<T> {
       .filter((c) => !keys.includes(c))
       .map((k) => writeValues[k]);
 
-    let query: string;
-    let params = [...insertParams, ...updateParams];
+    let result: T | null;
 
-    if (dbType === DBType.SQLite) {
-      const updateClause = columns
-        .filter((c) => !keys.includes(c))
-        .map((c) => `${this.columns[c]?.name} = ?`)
-        .join(", ");
-      query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON CONFLICT(${conflictColumns.join(", ")}) DO UPDATE SET ${updateClause}`;
-    } else if (dbType === DBType.MySQL) {
-      const updateClause = columns
-        .filter((c) => !keys.includes(c))
-        .map((c) => `${this.columns[c]?.name} = ?`)
-        .join(", ");
-      query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateClause}`;
-    } else if (dbType === DBType.MSSQL) {
-      // `MERGE` refers to each value by a source column name, so the parameters
-      // are the insert payload alone — the update payload is not bound a second
-      // time the way the `?`-based dialects above bind it.
-      query = buildMSSQLUpsertSQL(
-        this.table,
-        columns.map((c) => this.columns[c]!.name),
-        conflictColumns,
-      );
-      params = insertParams;
-    } else {
-      const pgUpdateClause = columns
-        .filter((c) => !keys.includes(c))
-        .map(
-          (c) => `${this.columns[c]?.name} = EXCLUDED.${this.columns[c]?.name}`,
-        )
-        .join(", ");
-      query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON CONFLICT (${conflictColumns.join(", ")}) DO UPDATE SET ${pgUpdateClause} RETURNING *`;
-      params = insertParams;
-    }
-
-    const results = (await client.query<T>(query, params)).map((row) =>
-      this.processForLoad(row),
-    );
-
-    // SQLite and MySQL report nothing for an `INSERT ... ON CONFLICT`, so the
-    // row has to be read back. It must be read back by the conflict keys:
-    // on the DO UPDATE path no insert happened, so `last_insert_rowid()` still
-    // holds an unrelated earlier statement's value and pointed at a row this
-    // upsert never touched.
-    let result: T | null = results[0] ?? null;
-    if (!result) result = await this.findRowByKeys(keys, writeValues, client);
-    if (!result && keys.length === 0) {
-      const id = await this.resolveInsertedIds(
-        [writeValues as Partial<T>],
+    if (dbType === DBType.MongoDB) {
+      // One `findOneAndUpdate` with `upsert`, rather than the read-then-write
+      // the SQL branches compile to: two callers racing on a key that does not
+      // exist yet would otherwise both insert. The tail below — the hook pair,
+      // the history entry and the cache writes — is shared, so it still runs
+      // against whatever row the write landed on.
+      result = (await mongoUpsertRow(
+        this.mongoCtx,
+        keys,
+        writeValues,
+        before,
         client,
-        dbType,
-        this.primaryKeyField,
-        this.primaryKeyColumn,
+      )) as T | null;
+    } else {
+      let query: string;
+      let params = [...insertParams, ...updateParams];
+
+      if (dbType === DBType.SQLite) {
+        const updateClause = columns
+          .filter((c) => !keys.includes(c))
+          .map((c) => `${this.columns[c]?.name} = ?`)
+          .join(", ");
+        query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON CONFLICT(${conflictColumns.join(", ")}) DO UPDATE SET ${updateClause}`;
+      } else if (dbType === DBType.MySQL) {
+        const updateClause = columns
+          .filter((c) => !keys.includes(c))
+          .map((c) => `${this.columns[c]?.name} = ?`)
+          .join(", ");
+        query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateClause}`;
+      } else if (dbType === DBType.MSSQL) {
+        // `MERGE` refers to each value by a source column name, so the
+        // parameters are the insert payload alone — the update payload is not
+        // bound a second time the way the `?`-based dialects above bind it.
+        query = buildMSSQLUpsertSQL(
+          this.table,
+          columns.map((c) => this.columns[c]!.name),
+          conflictColumns,
+        );
+        params = insertParams;
+      } else {
+        const pgUpdateClause = columns
+          .filter((c) => !keys.includes(c))
+          .map(
+            (c) =>
+              `${this.columns[c]?.name} = EXCLUDED.${this.columns[c]?.name}`,
+          )
+          .join(", ");
+        query = `INSERT INTO ${this.table} (${columnNames}) VALUES (${placeholders}) ON CONFLICT (${conflictColumns.join(", ")}) DO UPDATE SET ${pgUpdateClause} RETURNING *`;
+        params = insertParams;
+      }
+
+      const results = (await client.query<T>(query, params)).map((row) =>
+        this.processForLoad(row),
       );
-      if (id.length > 0) {
-        result = await this.findOne(id[0], {}, client);
+
+      // SQLite and MySQL report nothing for an `INSERT ... ON CONFLICT`, so the
+      // row has to be read back. It must be read back by the conflict keys:
+      // on the DO UPDATE path no insert happened, so `last_insert_rowid()`
+      // still holds an unrelated earlier statement's value and pointed at a row
+      // this upsert never touched.
+      result = results[0] ?? null;
+      if (!result) result = await this.findRowByKeys(keys, writeValues, client);
+      if (!result && keys.length === 0) {
+        const id = await this.resolveInsertedIds(
+          [writeValues as Partial<T>],
+          client,
+          dbType,
+          this.primaryKeyField,
+          this.primaryKeyColumn,
+        );
+        if (id.length > 0) {
+          result = await this.findOne(id[0], {}, client);
+        }
       }
     }
 
@@ -1526,9 +1604,24 @@ export class Repository<T> {
     });
   }
 
+  /**
+   * Removes one row, which is what both `delete()` and `bulkDelete()` need.
+   *
+   * Shared rather than repeated so the two cannot disagree on what a delete
+   * means for a soft-deleting model — the bulk path used to carry its own copy
+   * of this statement.
+   */
   private async _delete(id: number | string, client: DBClient): Promise<void> {
     const start = performance.now();
     this.logger.logDebug(`Deleting ${this.table} with ID ${id}`);
+
+    if (this.getDBType(client) === DBType.MongoDB) {
+      await mongoDeleteRow(this.mongoCtx, id, client);
+      this.logger.logDebug(
+        `Deleted ${this.table} with ID ${id} in ${(performance.now() - start).toFixed(2)}ms`,
+      );
+      return;
+    }
 
     const query = this.softDeleteField
       ? `UPDATE ${this.table} SET ${this.softDeleteColumn} = ? WHERE id = ?`
@@ -1573,14 +1666,7 @@ export class Repository<T> {
 
         await this.runHooks(before, "beforeDelete");
 
-        const query = this.softDeleteField
-          ? `UPDATE ${this.table} SET ${this.softDeleteColumn} = ? WHERE id = ?`
-          : `DELETE FROM ${this.table} WHERE id = ?`;
-        const params = this.softDeleteField
-          ? [sanitizeSqlValue(new Date(), this.getDBType(client)), id]
-          : [id];
-
-        await client.query(query, params);
+        await this._delete(id, client);
 
         await this.runHooks(before, "afterDelete");
 
@@ -1613,10 +1699,14 @@ export class Repository<T> {
       );
     }
 
-    await client.query(
-      `UPDATE ${this.table} SET ${this.softDeleteColumn} = NULL WHERE id = ?`,
-      [id],
-    );
+    if (this.getDBType(client) === DBType.MongoDB) {
+      await mongoRecover(this.mongoCtx, id, client);
+    } else {
+      await client.query(
+        `UPDATE ${this.table} SET ${this.softDeleteColumn} = NULL WHERE id = ?`,
+        [id],
+      );
+    }
 
     const result = await this.findOne(id, {}, client);
     if (!result)
@@ -1871,8 +1961,17 @@ export class Repository<T> {
 
     // The join table has no model of its own, so its key columns are named by
     // the relation config rather than resolved through column metadata.
+    const mongo = this.getDBType(client) === DBType.MongoDB;
+    const linkRelation = { joinTable, foreignKey, inverseKey };
     const links: { parent: any; child: any }[] = [];
     for (const chunk of chunked(parentIds, RELATION_BATCH_SIZE)) {
+      if (mongo) {
+        // One `$in` over the link collection per chunk, the same shape the SQL
+        // path sends — which is why relations need no rewrite for a document
+        // store: they were already batched reads rather than joins.
+        links.push(...(await mongoFindLinks(client, linkRelation, chunk)));
+        continue;
+      }
       const found = await client.query<Record<string, any>>(
         `SELECT ${foreignKey} AS __parent, ${inverseKey} AS __child FROM ${joinTable} WHERE ${foreignKey} IN (${chunk.map(() => "?").join(", ")})`,
         chunk,
@@ -1911,16 +2010,24 @@ export class Repository<T> {
   ): Promise<{ data: T[]; total: number; page: number; pageSize: number }> {
     const qb = this.find();
     const data = await qb.paginate(page, pageSize).execute(this.client);
-    let countQuery = `SELECT COUNT(*) as count FROM ${this.table}`;
-    let countParams: any[] = [];
-    if (this.softDeleteField) {
-      countQuery += ` WHERE ${this.table}.${this.softDeleteColumn} IS NULL`;
+    let count: number;
+    if (this.getDBType() === DBType.MongoDB) {
+      // The count is the same predicate the page itself was drawn with, so it
+      // goes through `count()` rather than a second, hand-written filter — the
+      // two would otherwise be free to disagree about soft-deleted rows.
+      count = await this.count();
+    } else {
+      let countQuery = `SELECT COUNT(*) as count FROM ${this.table}`;
+      const countParams: any[] = [];
+      if (this.softDeleteField) {
+        countQuery += ` WHERE ${this.table}.${this.softDeleteColumn} IS NULL`;
+      }
+      const result = await this.client.query<{ count: number }>(
+        countQuery,
+        countParams,
+      );
+      count = result?.[0]?.count ?? 0;
     }
-    const result = await this.client.query<{ count: number }>(
-      countQuery,
-      countParams,
-    );
-    const count = result?.[0]?.count ?? 0;
     return { data, total: Number(count), page, pageSize };
   }
 
@@ -2100,6 +2207,10 @@ export class Repository<T> {
     min?: string[];
     max?: string[];
   }): Promise<Record<string, any>> {
+    if (this.getDBType() === DBType.MongoDB) {
+      return mongoAggregateRows(this.mongoCtx, options, this.client);
+    }
+
     const selectParts: string[] = [];
 
     if (options.count) {
@@ -2262,7 +2373,12 @@ export class Repository<T> {
   // ─── FEATURE 10: truncate (Rails-style) ───────────────────────────
 
   async truncate(_client?: DBClient): Promise<void> {
-    await (_client || this.client).queryExec(`DELETE FROM ${this.table}`);
+    const client = _client || this.client;
+    if (this.getDBType(client) === DBType.MongoDB) {
+      await mongoTruncate(this.mongoCtx, client);
+      return;
+    }
+    await client.queryExec(`DELETE FROM ${this.table}`);
     await this.invalidateTableCache();
   }
 
@@ -2312,6 +2428,10 @@ export class Repository<T> {
   // ─── FEATURE 13: distinct count ───────────────────────────────────
 
   async countDistinct(column: string): Promise<number> {
+    if (this.getDBType() === DBType.MongoDB) {
+      return mongoCountDistinct(this.mongoCtx, column, this.client);
+    }
+
     const colName = this.columns[column]?.name || column;
     const qb = new QueryBuilder(this.table);
     if (this.softDeleteField) {
@@ -2332,6 +2452,12 @@ export class Repository<T> {
   ): Promise<T> {
     const client = _client || this.client;
     const colName = this.columns[field]?.name || field;
+    if (this.getDBType(client) === DBType.MongoDB) {
+      await mongoIncrement(this.mongoCtx, id, field, amount, client);
+      await this.invalidateRowCache(id);
+      return (await this.findOne(id, {}, client)) as T;
+    }
+
     let query = `UPDATE ${this.table} SET ${colName} = ${colName} + ? WHERE id = ?`;
     if (this.softDeleteField) query += ` AND ${this.softDeleteColumn} IS NULL`;
     await client.queryExec(query, [amount, id]);
@@ -2349,6 +2475,12 @@ export class Repository<T> {
   ): Promise<T> {
     const client = _client || this.client;
     const colName = this.columns[field]?.name || field;
+    if (this.getDBType(client) === DBType.MongoDB) {
+      await mongoIncrement(this.mongoCtx, id, field, -amount, client);
+      await this.invalidateRowCache(id);
+      return (await this.findOne(id, {}, client)) as T;
+    }
+
     let query = `UPDATE ${this.table} SET ${colName} = ${colName} - ? WHERE id = ?`;
     if (this.softDeleteField) query += ` AND ${this.softDeleteColumn} IS NULL`;
     await client.queryExec(query, [amount, id]);
@@ -2396,6 +2528,11 @@ export class Repository<T> {
     const client = _client || this.client;
     const colName = this.columns[field]?.name || field;
     const dbType = this.getDBType();
+    if (dbType === DBType.MongoDB) {
+      await mongoToggle(this.mongoCtx, id, field, client);
+      await this.invalidateRowCache(id);
+      return (await this.findOne(id, {}, client)) as T;
+    }
     const expr =
       dbType === DBType.Postgres
         ? `NOT ${colName}`
@@ -2450,6 +2587,17 @@ export class Repository<T> {
     // bulk update wrote plaintext straight into an encrypted column.
     const writeValues = this.processForSave(payload);
 
+    if (this.getDBType(client) === DBType.MongoDB) {
+      const count = await mongoUpdateMany(
+        this.mongoCtx,
+        conditions as Record<string, any>,
+        writeValues,
+        client,
+      );
+      await this.invalidateTableCache();
+      return count;
+    }
+
     const setParts: string[] = [];
     const setParams: any[] = [];
     for (const key of Object.keys(writeValues)) {
@@ -2501,6 +2649,15 @@ export class Repository<T> {
   async deleteBy(conditions: Partial<T>, _client?: DBClient): Promise<number> {
     const client = _client || this.client;
     this.assertConditions(conditions, "deleteBy");
+    if (this.getDBType(client) === DBType.MongoDB) {
+      const count = await mongoDeleteManyBy(
+        this.mongoCtx,
+        conditions as Record<string, any>,
+        client,
+      );
+      await this.invalidateTableCache();
+      return count;
+    }
     const whereParts: string[] = [];
     const whereParams: any[] = [];
     for (const [key, value] of Object.entries(conditions)) {
@@ -2542,6 +2699,15 @@ export class Repository<T> {
       throw new StabilizeError("Soft delete not enabled", "RECOVER_ERROR");
     }
     const client = _client || this.client;
+    if (this.getDBType(client) === DBType.MongoDB) {
+      const count = await mongoRestoreManyBy(
+        this.mongoCtx,
+        conditions as Record<string, any>,
+        client,
+      );
+      await this.invalidateTableCache();
+      return count;
+    }
     const whereParts: string[] = [`${this.softDeleteColumn} IS NOT NULL`];
     const whereParams: any[] = [];
     for (const [key, value] of Object.entries(conditions)) {
@@ -2654,7 +2820,18 @@ export class Repository<T> {
     const client = _client || this.client;
     const dbType = this.getDBType(client);
     const qb = this.find().whereEq("id", id).limit(1);
-    if (dbType !== DBType.SQLite && dbType !== DBType.MSSQL) {
+    if (dbType === DBType.MongoDB) {
+      // MongoDB has no `SELECT … FOR UPDATE`, and nothing stands in for it: a
+      // document read cannot be held against a concurrent writer. The
+      // atomicity a read-modify-write actually wants lives in an atomic update
+      // or in a transaction, so the caller has to be told the lock is absent —
+      // the method's name promises one, and its *result* cannot show the
+      // difference, which is a lost update with nothing to notice.
+      this.logger.logWarn(
+        `lockForUpdate on ${this.table} takes no lock on MongoDB: ` +
+          `use a transaction or an atomic update for read-modify-write`,
+      );
+    } else if (dbType !== DBType.SQLite && dbType !== DBType.MSSQL) {
       // T-SQL has no `FOR UPDATE`; its equivalent is a table hint
       // (`WITH (UPDLOCK)`), which this builder cannot express. Skipping the
       // clause keeps the statement valid on SQL Server, at the cost of the
@@ -2724,6 +2901,12 @@ export class Repository<T> {
 
   async random(): Promise<T | null> {
     const dbType = this.getDBType();
+    if (dbType === DBType.MongoDB) {
+      // `ORDER BY RANDOM() LIMIT 1` has no MongoDB spelling; the server-side
+      // `$sample` stage is the equivalent, and it does not scale with the
+      // collection the way sorting every document would.
+      return mongoRandom(this.mongoCtx, this.client) as Promise<T | null>;
+    }
     let orderByExpr: string;
     if (dbType === DBType.MySQL) {
       orderByExpr = "RAND()";
@@ -2858,6 +3041,13 @@ export class Repository<T> {
       relation,
       "fetchLinkedIds",
     );
+    if (this.getDBType(client) === DBType.MongoDB) {
+      return mongoFetchLinkedIds(
+        client,
+        { joinTable, foreignKey, inverseKey },
+        id,
+      );
+    }
     const rows = await client.query<Record<string, any>>(
       `SELECT ${inverseKey} FROM ${joinTable} WHERE ${foreignKey} = ?`,
       [id],
@@ -2903,6 +3093,17 @@ export class Repository<T> {
     const missing = wanted.filter((value) => !linked.has(String(value)));
     if (missing.length === 0) return 0;
 
+    if (this.getDBType(client) === DBType.MongoDB) {
+      await mongoAttachLinks(
+        client,
+        { joinTable, foreignKey, inverseKey },
+        id,
+        missing,
+      );
+      await this.invalidateRowCache(id);
+      return missing.length;
+    }
+
     await client.queryExec(
       `INSERT INTO ${joinTable} (${foreignKey}, ${inverseKey}) VALUES ${missing
         .map(() => "(?, ?)")
@@ -2938,6 +3139,19 @@ export class Repository<T> {
       relation,
       "detach",
     );
+
+    if (this.getDBType(client) === DBType.MongoDB) {
+      const removed = await mongoDetachLinks(
+        client,
+        { joinTable, foreignKey, inverseKey },
+        id,
+        targetIds === undefined
+          ? undefined
+          : this.normalizeLinkTargets(targetIds),
+      );
+      await this.invalidateRowCache(id);
+      return removed;
+    }
 
     let query = `DELETE FROM ${joinTable} WHERE ${foreignKey} = ?`;
     const params: any[] = [id];
@@ -2991,6 +3205,14 @@ export class Repository<T> {
       const toDetach = existing.filter(
         (value) => !wantedKeys.has(String(value)),
       );
+
+      if (this.getDBType(txClient) === DBType.MongoDB) {
+        const linkRelation = { joinTable, foreignKey, inverseKey };
+        await mongoAttachLinks(txClient, linkRelation, id, toAttach);
+        await mongoDetachLinks(txClient, linkRelation, id, toDetach);
+        await this.invalidateRowCache(id);
+        return { attached: toAttach.length, detached: toDetach.length };
+      }
 
       if (toAttach.length > 0) {
         await txClient.queryExec(

@@ -993,8 +993,20 @@ export class QueryBuilder<T> {
    * known — that is what lets one builder render for either backend.
    *
    * A `lock()`/`forUpdate()` is **not** reported. MongoDB has no row locking to
-   * map it onto and the call is a no-op, matching what the SQL Server path
-   * already does with it; the repository logs that where it has a logger.
+   * map it onto, so the clause is simply not rendered and the statement runs
+   * unlocked — the same walk-past the SQL Server path already takes, where a
+   * `FOR UPDATE` would be invalid T-SQL. Unlike a blocked clause this changes
+   * what the query guarantees without changing its result, so it is documented
+   * in the README rather than thrown: an error here would refuse queries that
+   * have a perfectly good answer.
+   *
+   * The builder cannot warn about the dropped lock itself — it holds no logger,
+   * and it is dialect-agnostic right up until `execute()`, by which point the
+   * caller has stopped listening. `Repository.lockForUpdate` warns on its own
+   * behalf instead, since that is the path that adds the clause for a caller
+   * who asked for a lock by name. A `qb.lock()` written by hand and handed
+   * straight to `execute()` is still walked past in silence; that residual is
+   * why the README says so in prose as well.
    *
    * @throws StabilizeError `MONGO_UNSUPPORTED` naming every clause that has no
    *   MongoDB equivalent.

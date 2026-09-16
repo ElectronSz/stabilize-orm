@@ -41,6 +41,12 @@ import {
   type StabilizeEventHandler,
   StabilizeEmitter,
   generateUUID,
+  // The two MongoDB types this package re-exports. Both are reached through
+  // `types.ts`, the shared type surface: `mongo-query` and `mongo-schema` are
+  // not published entry points, so neither is somewhere a consumer could name
+  // them from.
+  type Predicate,
+  type MongoStep,
 } from "./types";
 import { defineModel, MetadataStorage } from "./model";
 import type { Hook } from "./hooks";
@@ -305,4 +311,11 @@ export type {
   QueryLogEntry,
   StabilizeEvent,
   StabilizeEventHandler,
+  // The two MongoDB types a consumer can legitimately need to name: the
+  // predicate the query builder records, and the serializable migration step.
+  // Both are reached through `types.ts`, the shared type surface, rather than
+  // through `mongo-query`/`mongo-schema` — neither of which is a published
+  // entry point.
+  Predicate,
+  MongoStep,
 };

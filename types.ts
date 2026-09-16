@@ -108,6 +108,20 @@ export interface CacheStats {
 }
 
 /**
+ * The predicate shape a `QueryBuilder` records for MongoDB.
+ *
+ * Declared in `mongo-query`, where it is translated into a filter, and
+ * re-exported here because this module is the package's public type surface:
+ * `./types` is a published entry point and `./mongo-query` is not, so a consumer
+ * that wants to name the shape — in a helper that builds conditions, or to
+ * annotate a custom scope — would otherwise have no way to reach it.
+ *
+ * The re-export is type-only and therefore erased, so it adds no runtime edge
+ * back into `mongo-query` (which imports `StabilizeError` from here).
+ */
+export type { Predicate } from "./mongo-query";
+
+/**
  * One schema change against MongoDB, as data rather than as a closure.
  *
  * A discriminated union so a generated migration is serializable and assertable

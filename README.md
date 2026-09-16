@@ -16,13 +16,14 @@ _A Modern, Type-Safe, and Expressive ORM for Bun_
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
 </p>
 
-**Stabilize** is a lightweight, feature-rich ORM designed for performance and developer experience. It provides a unified, database-agnostic API for **PostgreSQL**, **MySQL/MariaDB**, **SQLite**, and **SQL Server**. Powered by a robust query builder, programmatic model definitions, automatic versioning, and a full-featured command-line interface, Stabilize is built to scale with your app.
+**Stabilize** is a lightweight, feature-rich ORM designed for performance and developer experience. It provides a unified, database-agnostic API for **PostgreSQL**, **MySQL/MariaDB**, **SQLite**, and **SQL Server**, plus a **MongoDB** document backend with the boundaries spelled out [below](#-mongodb). Powered by a robust query builder, programmatic model definitions, automatic versioning, and a full-featured command-line interface, Stabilize is built to scale with your app.
 
 ---
 
 ## 🚀 Features
 
 - **Unified API**: Write once, run on PostgreSQL, MySQL/MariaDB, SQLite, or SQL Server.
+- **MongoDB Backend**: `DBType.MongoDB` runs the same repositories, relations, hooks and structured query builder against a document store, through the optional `mongodb` driver. Raw SQL, joins, unions, CTEs and raw clauses are refused with a `MONGO_UNSUPPORTED` error rather than mistranslated; the [boundaries](#-mongodb) are documented in full.
 - **Programmatic Model Definitions**: Define models and columns using the `defineModel` API with the `DataTypes` enum for database-agnostic schemas.
 - **Full-Featured CLI**: Generate models, manage migrations, seed data, and reset your database from the command line with [stabilize-cli](https://github.com/ElectronSz/stabilize-cli).
 - **Automatic Migrations**: Generate database-specific SQL schemas directly from your model definitions.
@@ -170,6 +171,138 @@ const loggerConfig: LoggerConfig = {
 
 export const orm = new Stabilize(dbConfig, cacheConfig, loggerConfig);
 ```
+
+---
+
+## 🍃 MongoDB
+
+`DBType.MongoDB` selects a document backend rather than a fifth SQL dialect. Its
+driver is the only optional dependency in the package, so install it alongside:
+
+```bash
+bun add mongodb
+```
+
+```typescript
+// config/database.ts
+import { DBType, type DBConfig } from "stabilize-orm";
+
+const dbConfig: DBConfig = {
+  type: DBType.MongoDB,
+  connectionString: process.env.MONGO_URL || "mongodb://localhost:27017/mydb",
+  // Optional. The fallback database for a URI that omits one from its path,
+  // which is how a mongo URI is usually written in development.
+  database: "mydb",
+  // Optional. Passed verbatim to the driver's `MongoClient` — `tls`,
+  // `authSource`, `maxPoolSize`, `retryWrites` and anything else the ORM has no
+  // opinion about.
+  mongoOptions: { maxPoolSize: 20 },
+};
+
+export default dbConfig;
+```
+
+Models, repositories, relations, hooks, versioning, soft deletes, validation,
+encryption, aggregates and transactions work as they do on SQL. A query is
+written with the query builder's *structured* methods — the ones that record a
+condition rather than SQL text:
+
+```typescript
+const users = await orm
+  .getRepository(User)
+  .find()
+  .whereEq("isActive", true)
+  .whereIn("role", ["admin", "editor"])
+  .orderBy("createdAt", "DESC")
+  .withRelations("roles")
+  .execute(orm.client);
+```
+
+`healthCheck()` pings the server. `poolStats()` returns
+`{ active: -1, idle: -1, total: -1 }`: the driver's pool is internal and
+per-server, so there is no honest number to report and the sentinel says so
+rather than inventing one.
+
+### What MongoDB cannot do
+
+A document store is not a SQL engine, and Stabilize refuses to guess where the
+two disagree. Every one of these is deliberate, and each is reported rather than
+silently mistranslated — a dropped `join()` would return the wrong rows with no
+error to notice.
+
+- **Raw SQL is refused.** `rawQuery()`, `rawExec()`, `query()` and `queryExec()`
+  throw a `StabilizeError` with code `MONGO_UNSUPPORTED`. Use the repository API
+  or the query builder's structured methods instead.
+
+  ```typescript
+  await orm.rawQuery("SELECT * FROM users WHERE age > ?", [25]);
+  // StabilizeError: Raw SQL is not available on MongoDB. ...
+  ```
+
+- **Joins, unions, CTEs and raw clauses throw.** `join()`, `innerJoin()`,
+  `leftJoin()`, `rightJoin()`, `fullJoin()`, `crossJoin()`, `union()`,
+  `unionAll()`, `with()`, `withRecursive()`, `whereRaw()`, `whereRef()`,
+  `whereExists()`, `whereNotExists()`, `selectRaw()`, `orderByRaw()`,
+  `groupByRaw()`, `having()`, `distinct()` and the SQL-text forms of
+  `where()`/`orWhere()`/`whereNot()` have no MongoDB equivalent. The throw
+  happens when the query is **executed**, not when the clause is added, and it
+  names every offending method at once:
+
+  ```typescript
+  await repo
+    .find()
+    .innerJoin("posts", "posts.user_id = users.id")
+    .whereRaw("LOWER(name) = 'ada'")
+    .execute(orm.client);
+  // StabilizeError: This query cannot be translated to MongoDB: innerJoin,
+  // whereRaw have no MongoDB equivalent. ... Use withRelations() for related
+  // documents, or run this query against a SQL backend.
+  ```
+
+  For a join, the replacement is `withRelations()`, which loads related
+  documents with batched reads rather than one statement:
+
+  ```typescript
+  await repo.find().withRelations("posts", "posts.comments").execute(orm.client);
+  ```
+
+- **`lock()` / `forUpdate()` is a no-op.** MongoDB has no row lock to map it
+  onto, so the clause is not rendered and the query runs unlocked rather than
+  failing. `lockForUpdate()` therefore reads the row without protecting it —
+  use `updateBy()` with a condition, or an optimistic lock column, for a
+  read-modify-write that has to be safe.
+
+- **`DECIMAL` is stored as a `double`.** MongoDB has no exact decimal unless the
+  caller supplies a `Decimal128`, so a `DECIMAL` column loses precision the way
+  a binary float does. For money, store the smallest unit as an `INTEGER`/`BIGINT`
+  or the value as a `STRING`.
+
+- **Auto-increment ids come from a counters collection — and they roll back.**
+  Ids are reserved by a `$inc` against `stabilize_counters`, keyed by collection
+  name, rather than by the server. Because that reservation runs inside the same
+  transaction as the write, an aborted transaction gives its ids back: the next
+  insert re-uses them. MySQL behaves the opposite way — InnoDB's auto-increment
+  counter is not transactional, so an aborted insert leaks the gap.
+
+- **Transactions need a replica set or a sharded cluster.** A standalone
+  `mongod` serves reads but rejects every transaction — and every repository
+  write (`create()`, `update()`, `delete()`, `bulkCreate()`, `upsert()` …) runs
+  inside one, so a standalone makes writes fail generally, not only
+  explicitly-transactional code. The client warns at connect time and reports
+  the failure as `TX_ERROR`:
+
+  ```typescript
+  // Standalone mongod, no replica set:
+  await repo.create({ name: "Ada" });
+  // StabilizeError (TX_ERROR): MongoDB transactions require a replica set or
+  // sharded cluster, and this server is a standalone. Every write goes through
+  // a transaction, so start the server with --replSet and run rs.initiate()
+  // (or point the connection at an existing replica set).
+  ```
+
+  Run a single-node replica set in development
+  (`rs.initiate()` on a `mongod --replSet rs0`) and every write path works
+  unchanged.
 
 ---
 

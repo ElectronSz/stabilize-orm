@@ -137,7 +137,9 @@ export function generateMongoMigration(
     up: [],
     down: [],
     mongoUp: buildUpSteps(model),
-    mongoDown: [{ kind: "dropCollection", collection: meta.tableName }],
+    // Derived, not hand-written, so the inverse of a migration is the inverse of
+    // exactly what it created — a versioned model's history collection included.
+    mongoDown: generateMongoSteps(model, "down"),
   };
 }
 

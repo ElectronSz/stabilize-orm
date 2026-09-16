@@ -311,4 +311,59 @@ suite("MongoDB integration", () => {
       _id: "m3_slugged",
     });
   });
+
+  it("visits every row exactly once when paging an unordered query", async () => {
+    // `eachBatch` walks the result set with `skip`/`limit` in a loop and sets
+    // no sort, which is safe on SQLite only because a rowid scan is stable.
+    // Mongo's `skip` over an unordered query has no such guarantee: the server
+    // is free to hand back a different order per call, so the second page can
+    // repeat rows from the first and drop others entirely — with no error, and
+    // a callback that has already been applied to whatever it was given.
+    //
+    // The fix is the implicit `{_id: 1}` sort the builder adds whenever a skip
+    // is set, which makes the order total and therefore the paging exact. That
+    // the sort is emitted is pinned without a server in
+    // `mongo.dialect.test.ts`; what this case adds is that the loop built on it
+    // terminates and stops at the short page.
+    const Paged = defineModel({
+      tableName: "m3_paged",
+      columns: {
+        id: { type: DataTypes.INTEGER, required: true },
+        name: { type: DataTypes.STRING },
+      },
+    });
+    await db.client.mongoDeleteMany("m3_paged", {});
+    await db.client.mongoDeleteMany(MONGO_COUNTERS_COLLECTION, {
+      _id: "m3_paged",
+    });
+
+    const repo = db.getRepository(Paged);
+    await repo.bulkCreate(
+      Array.from({ length: 250 }, (_, i) => ({ name: `row-${i}` })),
+    );
+
+    const seen: number[] = [];
+    let batches = 0;
+    await repo.eachBatch(
+      repo.find(),
+      (batch: any[]) => {
+        batches++;
+        for (const row of batch) seen.push(row.id);
+      },
+      100,
+    );
+
+    // 250 rows at 100 per page: 100, 100, 50 — the short final page is what
+    // stops the loop, so a page that came back full forever would hang here.
+    expect(batches).toBe(3);
+    expect(seen).toHaveLength(250);
+    expect(new Set(seen).size).toBe(250);
+    expect(Math.min(...seen)).toBe(1);
+    expect(Math.max(...seen)).toBe(250);
+
+    await db.client.mongoDeleteMany("m3_paged", {});
+    await db.client.mongoDeleteMany(MONGO_COUNTERS_COLLECTION, {
+      _id: "m3_paged",
+    });
+  });
 });
