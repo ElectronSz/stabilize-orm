@@ -1,7 +1,7 @@
 {
   "name": "stabilize-orm",
-  "version": "2.2.1",
-  "description": "A modern, type-safe ORM for Bun, Node.js, and Deno with support for SQLite, MySQL, PostgreSQL, Redis caching, optimistic locking, cursor pagination, and a full-featured query builder.",
+  "version": "3.0.0",
+  "description": "A modern, type-safe ORM for Bun, Node.js, and Deno with support for SQLite, MySQL, PostgreSQL, SQL Server and MongoDB, Redis caching, optimistic locking, cursor pagination, and a full-featured query builder.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
