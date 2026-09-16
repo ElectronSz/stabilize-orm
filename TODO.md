@@ -1,6 +1,6 @@
 # TODO
 
-Ordered by dependency. `stabilize-orm@3.0.0` and `stabilize-cli@3.0.0` are both
+Ordered by dependency. `stabilize-orm@3.1.0` and `stabilize-cli@3.1.0` are both
 published; everything below is what remains.
 
 ## Docs brought in line with the code
@@ -22,7 +22,10 @@ published; everything below is what remains.
       `db:table:info` and `db:console`. The source has always said so; only the
       docs were wrong. Corrected in the repo.
 
-## In progress
+## Shipped in 3.1.0
+
+Committed as `acd07a8` and published. 616 tests pass / 0 fail across 33 files,
+`tsc --noEmit` clean, build clean, no type leak in `dist/*.d.ts`.
 
 - [x] **`length`, `precision` and `scale` did nothing.** All three were declared
       on `ColumnConfig` and read by no one: the SQL type came from the
@@ -102,16 +105,14 @@ published; everything below is what remains.
 
 ## Next
 
-- [ ] **Push the docs once the ORM is published.** All the `stabilize-docs`
-      pages are rewritten and typecheck clean — the two event pages, the caching
-      page, the encryption page, and the sixteen files touched for the CLI and
-      the `length`/`precision`/`scale` work. They describe behaviour that is in
-      the working tree but **not on npm yet**, so pushing them ahead of the
-      publish would leave a reader who installs `3.0.0` reading documentation for
-      a version they do not have. Publish first, then push.
-- [ ] **Bump and publish `stabilize-orm`** once the five fixes above are in.
-      Confirm the version number before publishing — a published npm version
-      can never be reused. The changes that can break a working project:
+- [ ] **Push the docs.** Both packages are on npm at 3.1.0, which was the
+      condition for pushing — the pages describe behaviour a reader installing
+      today now actually gets. The `stabilize-docs` tree holds two commits:
+      `3c9f5eb` (the sixteen files for the CLI and the
+      `length`/`precision`/`scale` work) and `5405cd1` (the hero release line
+      and the CLI pages moved to 3.1.0). `bunx tsc --noEmit` clean.
+- [x] **`stabilize-orm@3.1.0` published.** Verified on the registry. The
+      changes that can break a working project:
       - Postgres `DECIMAL` now emits `DECIMAL(10,2)` where it used to emit a bare
         `DECIMAL`. A bare Postgres `DECIMAL` stores whatever it is handed; the
         constrained form does not. A regenerated migration narrows the column,
@@ -121,18 +122,35 @@ published; everything below is what remains.
       - `CacheStats` gained a **required** `backend` field.
       - v3 ciphertext is unreadable by older versions.
       - A missing encryption key generates one instead of throwing.
-- [ ] **Republish `stabilize-cli` to correct its registry page.** The published
-      3.0.0 tarball ships the README that was committed before the `query`
-      correction, and npm renders that file on the package page. The repo is
-      fixed; the registry still shows the old text until a 3.0.1 goes out. A
-      republish is the only way to change it.
-- [ ] **Decide whether to merge `chages` into `main`.** `chages` is 11 commits
-      ahead of local `main`, and local `main` is 5 behind `origin/main`. The
-      MongoDB backend and the 3.0.0 release exist on `chages` only, so GitHub's
-      default branch has no MongoDB work at all.
-- [ ] **Optionally tag `v3.0.0`.** Tags stop at `1.3.0` — no `v2.x` was ever
-      tagged despite two point releases shipping, so this convention is already
-      inconsistent.
+- [x] **`stabilize-cli@3.1.0` published**, which is what changes the registry
+      page: the 3.0.0 tarball shipped the README committed before the `query`
+      correction, and npm renders that file, so the package page was wrong in a
+      way only a republish could fix. The bundle is 3.50 MB and now carries the
+      3.1.0 ORM, so generated DDL changes for columns declaring `length`,
+      `precision` or `scale`.
+- [ ] **The README's validation list never learned about `length`.** It names
+      `required`, `minLength`/`maxLength`, `pattern` and `customValidator` —
+      not the three options that 3.1.0 made load-bearing. The `stabilize-docs`
+      pages cover it properly, and the README is not *wrong*, but it is the file
+      npm renders, so it needs a release of its own to reach the package page.
+      Left alone deliberately rather than edited after the publish: an edit now
+      would put repo HEAD and the published tarball out of step, which is the
+      problem this release existed to fix.
+- [ ] **The CLI builds against a symlink, not the registry.** Its
+      `node_modules/stabilize-orm` is a symlink to this checkout
+      (`/c/Users/offby/Documents/Research/stabilize`), so `bun run build` bundles
+      whatever is in the working tree — which is how the CLI embedded 3.1.0
+      before 3.1.0 was on npm. Convenient, and it is also how an uncommitted ORM
+      edit reaches a published CLI bundle without anyone deciding it should. The
+      declared `stabilize-orm: ^3.0.0` resolves from the registry on any other
+      machine, so the two paths can disagree.
+- [ ] **Decide whether to merge `chages` into `main`.** `chages` is 9 commits
+      ahead of `origin/main` and 1 behind it. The MongoDB backend and every
+      release since 2.2.0 exist on `chages` only, so GitHub's default branch has
+      no MongoDB work at all. `chages` itself is pushed.
+- [ ] **Optionally tag `v3.0.0` and `v3.1.0`.** Tags stop at `1.3.0` — no `v2.x`
+      was ever tagged despite two point releases shipping, so this convention is
+      already inconsistent.
 
 ## Then — the CLI
 
