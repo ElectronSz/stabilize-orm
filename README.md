@@ -5,11 +5,12 @@ _A Modern, Type-Safe, and Expressive ORM for Bun and Node.js_
 <p align="left">
   <a href="https://www.npmjs.com/package/stabilize-orm"><img src="https://img.shields.io/npm/v/stabilize-orm.svg?label=version&color=blue" alt="NPM Version"></a>
   <a href="https://github.com/ElectronSz/stabilize-orm/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/stabilize-orm.svg?color=green" alt="License"></a>
-  <a href="https://github.com/ElectronSz/stabilize-cli"><img src="https://img.shields.io/badge/Cli-Stabilize%202.2.1-blue.svg" alt="Stabilize CLI"></a>
+  <a href="https://github.com/ElectronSz/stabilize-cli"><img src="https://img.shields.io/badge/Cli-Stabilize%203.2.0-blue.svg" alt="Stabilize CLI"></a>
   <a href="#"><img src="https://img.shields.io/badge/PostgreSQL-supported-blue" alt="PostgreSQL"></a>
   <a href="#"><img src="https://img.shields.io/badge/MySQL-supported-blue" alt="MySQL"></a>
   <a href="#"><img src="https://img.shields.io/badge/SQLite-supported-blue" alt="SQLite"></a>
   <a href="#"><img src="https://img.shields.io/badge/SQL%20Server-supported-blue" alt="SQL Server"></a>
+  <a href="#-mongodb"><img src="https://img.shields.io/badge/MongoDB-supported-blue" alt="MongoDB"></a>
 <a href="https://github.com/ElectronSz/stabilize-orm/actions/workflows/ci-cd.yml">
   <img src="https://github.com/ElectronSz/stabilize-orm/actions/workflows/ci-cd.yml/badge.svg" alt="Build Status">
 </a>
@@ -673,6 +674,19 @@ Supported hooks: `beforeCreate`, `afterCreate`, `beforeUpdate`, `afterUpdate`, `
 ## 💻 Command-Line Interface (CLI)
 
 Stabilize includes a powerful CLI with 31 commands. See: [stabilize-cli on GitHub](https://github.com/ElectronSz/stabilize-cli)
+
+```bash
+npm install -g stabilize-cli   # or: bun add -g stabilize-cli
+stabilize-cli --version
+```
+
+One published bundle, no native dependencies: the same install runs on **Node.js
+22.18+** and **Bun 1.3+**, and picks the runtime's own SQLite driver.
+
+> Running under Node? Add `"type": "module"` to your project's `package.json`.
+> The CLI imports your `config/database.ts` and `models/*.ts` at run time, and
+> without it Node treats those files as CommonJS, so their `import` statements
+> fail before any command runs. Bun projects need nothing.
 
 ### Generate
 
