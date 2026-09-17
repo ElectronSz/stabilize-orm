@@ -1,6 +1,6 @@
 {
   "name": "stabilize-orm",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "A modern, type-safe ORM for Bun and Node.js with support for SQLite, MySQL, PostgreSQL, SQL Server and MongoDB, Redis caching, optimistic locking, cursor pagination, and a full-featured query builder.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
