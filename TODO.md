@@ -1,10 +1,7 @@
 # TODO
 
-Ordered by dependency. `stabilize-orm@3.1.0` and `stabilize-cli@3.1.0` are both
-published; everything below is what remains. The cross-runtime work in the first
-section is **done and verified but not yet published** — it needs a version
-number confirmed before `npm publish`, because a published version can never be
-reused.
+Ordered by dependency. `stabilize-orm@3.2.0` and `stabilize-cli@3.2.0` are both
+published and verified from the registry; everything below is what remains.
 
 ## Cross-runtime: the package loads on Node now
 
@@ -76,10 +73,18 @@ reused.
       mentions are inside doc comments). Packed tarball: **Node 15/0, Bun 14/0**
       plus an honest note that `bun:sqlite` reads `9007199254740993` back as
       `9007199254740992`.
-- [ ] **Not published yet.** Needs a version confirmed out loud first.
-- [ ] **The README edit needs its own release to reach the npm package page** —
-      same constraint as the validation-list item below. Deno is also still
-      unverified rather than disproven; nothing here tests it either way.
+- [x] **Published as 3.2.0**, ORM and CLI together. Verified from the registry
+      rather than from the publish command, which reports success before the
+      version is actually served: `npm install stabilize-cli` in a clean
+      directory now resolves `stabilize-cli@3.2.0` against
+      `stabilize-orm@3.2.0`, and `--version`, `config:init`, `generate:all`,
+      `migrate` and `db:tables` all exit 0 there on Node.
+- [ ] **The README edits made after the 3.2.0 publish need their own release.**
+      The ORM's Runtimes section went out with 3.2.0, but its corrected CLI
+      badge and its CLI installation instructions were written afterwards, and
+      the CLI's runtime section likewise. Same constraint as the validation-list
+      item below. Deno is also still unverified rather than disproven; nothing
+      here tests it either way.
 
 ## Docs brought in line with the code
 
@@ -291,11 +296,29 @@ Committed as `acd07a8` and published. 616 tests pass / 0 fail across 33 files,
       mattered — read-then-write in `update`, the upsert round-trip, the JSON
       column round-trip — all pass on Node (15/0). Flagged as a latent
       divergence, not a bug.
-- [ ] **The CLI has no `-V, --version`.** `--version` is rejected as an unknown
-      option; the version is only visible in the banner and in `info`. Every
-      other command has `-h, --help`. Adding `program.version(version)` is one
-      line, but it is a new flag rather than a fix, so it is flagged rather than
-      added unilaterally.
+- [x] **The CLI had no `-V, --version`.** `--version` was rejected as an unknown
+      option and the version was only reachable through the banner and `info`.
+      Fixed in CLI 3.2.0 as `program.version(version, "-V, --version", …)`. The
+      docblock on the version constant had claimed the flag existed all along,
+      so this was a fix rather than a new flag after all.
+- [ ] **`model:validate` reports "missing type" on columns the CLI's own
+      generator emits.** Run `generate:model` and then `model:validate` against
+      what it just wrote and it flags every column but `deletedAt`:
+
+      ```
+      Column 'id' missing type
+      Column 'name' missing type
+      Column 'email' missing type
+      ```
+
+      Reproduced identically under Bun and under Node, so it is neither
+      runtime-dependent nor caused by the cross-runtime work — it predates it.
+      Not yet diagnosed: the likely shape is that the generated `defineModel`
+      call and the validator disagree about where a column's `type` lives (a
+      bare `DataTypes.STRING` versus a `{ type: … }` wrapper), and
+      `deletedAt` escaping is the clue, since it is the one column the
+      generator writes in a different form. Flagged rather than fixed: the fix
+      depends on which of the two is wrong, and that is a behaviour decision.
 
 ## Done
 
