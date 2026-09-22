@@ -99,7 +99,7 @@
   "author": "ElectronSz <lwazicd@icloud.com>",
   "license": "MIT",
   "dependencies": {
-    "ioredis": "^5.8.1",
+    "ioredis": "^6.0.0",
     "mssql": "^12.7.2",
     "mysql2": "^3.15.2",
     "pg": "^8.16.3"
